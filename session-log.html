@@ -1,0 +1,596 @@
+<!doctype html>
+<title>glorytun — session log</title>
+<style>
+  :root {
+    --bg: #F6F4EF;
+    --surface: #ECE9E1;
+    --surface-2: #E2DDD0;
+    --text: #201D18;
+    --text-dim: #6B6357;
+    --accent: #B96E1F;
+    --accent-soft: #E7C39A;
+    --border: #DAD5C9;
+    --ok: #4B7A56;
+    --warn: #B96E1F;
+    --crit: #A8483A;
+    --code-bg: #FBFAF7;
+    --shadow: 0 1px 2px rgba(32,29,24,0.06), 0 8px 24px rgba(32,29,24,0.06);
+
+    --serif: Georgia, "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+    --sans: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "Consolas", "Liberation Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14181F;
+      --surface: #1B212A;
+      --surface-2: #232A35;
+      --text: #E8E6E1;
+      --text-dim: #8B93A1;
+      --accent: #E0A263;
+      --accent-soft: #4A3826;
+      --border: #2A303C;
+      --ok: #7FB88C;
+      --warn: #E0A263;
+      --crit: #D08276;
+      --code-bg: #10141A;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #14181F;
+    --surface: #1B212A;
+    --surface-2: #232A35;
+    --text: #E8E6E1;
+    --text-dim: #8B93A1;
+    --accent: #E0A263;
+    --accent-soft: #4A3826;
+    --border: #2A303C;
+    --ok: #7FB88C;
+    --warn: #E0A263;
+    --crit: #D08276;
+    --code-bg: #10141A;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--serif);
+    font-size: 17px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--accent); }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  h1, h2, h3 {
+    font-family: var(--serif);
+    text-wrap: balance;
+    font-weight: 600;
+    line-height: 1.2;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 240px minmax(0, 1fr);
+    gap: 0;
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+
+  nav.toc {
+    position: sticky;
+    top: 0;
+    align-self: start;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 2.5rem 1.25rem 2rem 1.5rem;
+    border-right: 1px solid var(--border);
+    font-family: var(--sans);
+  }
+  .toc .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin-bottom: 0.15rem;
+  }
+  .toc .brand-mark {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 1.05rem;
+    color: var(--accent);
+  }
+  .toc .brand-sub {
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .toc .fork-tag {
+    display: inline-block;
+    margin: 0.6rem 0 1.6rem;
+    font-size: 0.68rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--accent);
+    border: 1px solid var(--accent-soft);
+    background: var(--accent-soft);
+    padding: 0.2rem 0.5rem;
+    border-radius: 3px;
+  }
+  .toc ul { list-style: none; padding: 0; margin: 0 0 1.4rem; }
+  .toc .group-label {
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin: 1.3rem 0 0.5rem;
+  }
+  .toc li a {
+    display: block;
+    padding: 0.28rem 0;
+    color: var(--text);
+    text-decoration: none;
+    font-size: 0.87rem;
+    border-left: 2px solid transparent;
+    padding-left: 0.6rem;
+    margin-left: -0.6rem;
+  }
+  .toc li a:hover { color: var(--accent); border-left-color: var(--accent-soft); }
+
+  main {
+    padding: 3rem clamp(1.25rem, 4vw, 4rem) 6rem;
+    min-width: 0;
+  }
+  main > header.intro { max-width: 66ch; margin-bottom: 2.4rem; }
+  main > header.intro .eyebrow {
+    font-family: var(--sans);
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 0.8rem;
+  }
+  main > header.intro h1 {
+    font-size: clamp(2rem, 4vw, 2.6rem);
+    margin: 0 0 0.9rem;
+  }
+  main > header.intro p { color: var(--text-dim); font-size: 1.08rem; }
+
+  /* ---------- summary table ---------- */
+  table.summary {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--sans);
+    font-size: 0.86rem;
+    margin: 0 0 3.6rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+  }
+  table.summary th {
+    text-align: left;
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding: 0.7rem 1rem;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+  }
+  table.summary td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    background: var(--surface);
+  }
+  table.summary tr:last-child td { border-bottom: none; }
+  table.summary td.q { color: var(--text); font-weight: 600; width: 34%; }
+  table.summary td.a { color: var(--text-dim); }
+
+  section {
+    max-width: 74ch;
+    margin: 0 0 3.6rem;
+    scroll-margin-top: 1.5rem;
+  }
+  section.wide { max-width: 100%; }
+
+  section h2 {
+    font-size: 1.5rem;
+    margin: 0 0 0.3rem;
+    padding-top: 1.6rem;
+    border-top: 1px solid var(--border);
+  }
+  section h2 .num {
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    color: var(--accent);
+    font-weight: 400;
+    margin-right: 0.6rem;
+  }
+  section .dek {
+    font-family: var(--sans);
+    color: var(--text-dim);
+    font-size: 0.95rem;
+    margin: 0 0 1.4rem;
+  }
+  section p { margin: 0 0 1.1rem; }
+  section ul, section ol { margin: 0 0 1.1rem; padding-left: 1.3rem; }
+  section li { margin-bottom: 0.4rem; }
+  section strong { color: var(--text); }
+  code.inline {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0.1em 0.35em;
+  }
+
+  blockquote.finding {
+    margin: 1.4rem 0;
+    padding: 0.9rem 1.2rem;
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    border-radius: 0 6px 6px 0;
+    font-family: var(--sans);
+    font-size: 0.92rem;
+    color: var(--text);
+  }
+  blockquote.finding .label {
+    display: block;
+    font-size: 0.66rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 0.35rem;
+  }
+
+  .thread-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.9rem;
+    margin: 1.3rem 0 1.8rem;
+    font-family: var(--sans);
+  }
+  .thread-grid .card {
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 1rem 1.1rem;
+    background: var(--surface);
+  }
+  .thread-grid .card h4 {
+    font-family: var(--sans);
+    font-size: 0.85rem;
+    margin: 0 0 0.4rem;
+    color: var(--accent);
+  }
+  .thread-grid .card p { font-size: 0.83rem; color: var(--text-dim); margin: 0; }
+
+  .term {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    line-height: 1.55;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    overflow: hidden;
+    margin: 0.9rem 0;
+  }
+  .term-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.5rem 0.8rem;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .term-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+  .term-bar .label {
+    font-family: var(--sans);
+    font-size: 0.68rem;
+    color: var(--text-dim);
+    margin-left: 0.4rem;
+    letter-spacing: 0.02em;
+  }
+  .term pre {
+    margin: 0;
+    padding: 0.9rem 1.1rem 1.05rem;
+    overflow-x: auto;
+    white-space: pre;
+    font-variant-numeric: tabular-nums;
+  }
+  .term .prompt { color: var(--text-dim); }
+  .term .ok-text { color: var(--ok); }
+  .term .warn-text { color: var(--warn); }
+  .term .crit-text { color: var(--crit); }
+  .term .dim { color: var(--text-dim); }
+
+  table.states {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--sans);
+    font-size: 0.86rem;
+    margin: 1rem 0 1.6rem;
+  }
+  table.states th {
+    text-align: left;
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding: 0.5rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+  }
+  table.states td {
+    padding: 0.55rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  table.states tr:last-child td { border-bottom: none; }
+  .pill {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    padding: 0.08rem 0.45rem;
+    border-radius: 3px;
+    border: 1px solid currentColor;
+  }
+  .pill.ok { color: var(--ok); }
+  .pill.warn { color: var(--warn); }
+  .pill.crit { color: var(--crit); }
+  .pill.neutral { color: var(--text-dim); }
+
+  .checklist { font-family: var(--sans); font-size: 0.92rem; }
+  .checklist li {
+    display: flex;
+    gap: 0.7rem;
+    align-items: flex-start;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--border);
+    list-style: none;
+    margin: 0;
+  }
+  .checklist li:last-child { border-bottom: none; }
+  .checklist .n {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--accent);
+    flex-shrink: 0;
+    padding-top: 0.15rem;
+  }
+  .checklist ol { padding-left: 0; margin: 0; }
+
+  footer.page-end {
+    max-width: 74ch;
+    font-family: var(--sans);
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    border-top: 1px solid var(--border);
+    padding-top: 1.4rem;
+    margin-top: 2rem;
+  }
+
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc {
+      position: sticky; top: 0; height: auto; max-height: none;
+      border-right: none; border-bottom: 1px solid var(--border);
+      padding: 1rem 1.25rem; background: var(--bg); z-index: 5;
+      display: flex; flex-wrap: nowrap; overflow-x: auto; align-items: center; gap: 1.2rem;
+    }
+    .toc .brand { flex-shrink: 0; }
+    .toc .fork-tag { display: none; }
+    .toc ul { display: flex; gap: 1.1rem; margin: 0; flex-shrink: 0; }
+    .toc .group-label { display: none; }
+    .toc li a { white-space: nowrap; padding: 0.2rem 0; }
+    main { padding: 2.2rem 1.25rem 4rem; }
+  }
+</style>
+
+<div class="layout">
+  <nav class="toc" aria-label="Table of contents">
+    <div class="brand">
+      <span class="brand-mark">glorytun</span>
+      <span class="brand-sub">session log</span>
+    </div>
+    <span class="fork-tag">multipath tuning</span>
+
+    <div class="group-label">The session</div>
+    <ul>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#reading">Reading the codebase first</a></li>
+      <li><a href="#the-question">Why -P1 never matched -P8</a></li>
+      <li><a href="#options">The options on the table</a></li>
+      <li><a href="#building">Building the resequencing buffer</a></li>
+      <li><a href="#first-round">First real-hardware round</a></li>
+      <li><a href="#congestion">Getting congestion control right</a></li>
+      <li><a href="#redesign">The long-haul regression, and the fix</a></li>
+    </ul>
+
+    <div class="group-label">Reference</div>
+    <ul>
+      <li><a href="#status">Where things stand</a></li>
+      <li><a href="#next">Code → build → test</a></li>
+    </ul>
+  </nav>
+
+  <main>
+    <header class="intro">
+      <div class="eyebrow">Session log — one long working conversation</div>
+      <h1>Chasing a single flow to full speed</h1>
+      <p>A log of one continuous session spent understanding this glorytun fork, then diagnosing and closing the gap between what a single TCP connection gets through a two-ISP bonded tunnel and what several connections get together — from first read of the codebase through a shipped, empirically-tested fix and a mid-flight redesign prompted by a real long-haul VPS.</p>
+    </header>
+
+    <table class="summary">
+      <tr><th colspan="2">The shape of the session, if you only read one thing</th></tr>
+      <tr><td class="q">What was actually wrong</td><td class="a">Nothing was broken — <code class="inline">iperf3 -P1</code> measuring far below <code class="inline">-P8</code> is TCP correctly reacting to real packet reordering caused by per-packet (not per-flow) multipath scheduling.</td></tr>
+      <tr><td class="q">What got built</td><td class="a">A resequencing buffer in <code class="inline">mud.c</code> (<code class="inline">reorderwindow</code>) that holds decrypted packets just long enough to restore send order before handing them to the TUN device — reusing data the transport already had, no wire-protocol change.</td></tr>
+      <tr><td class="q">What almost shipped wrong</td><td class="a">The first version applied one flat delay to <em>every</em> packet. A live test against a real ~200ms-RTT VPS showed that flat delay actively making things worse — fixed by making the hold adaptive per physical path, an idea that came from the user mid-session.</td></tr>
+      <tr><td class="q">What else moved the needle</td><td class="a">BBR congestion control, applied on the real TCP endpoints (not the tunnel routers) — often the single biggest lever, separate from anything glorytun does.</td></tr>
+      <tr><td class="q">What stayed a hard limit</td><td class="a">One TCP connection has one congestion window and one RTT. Nothing here — or in any multipath tunnel — makes <code class="inline">-P1</code> literally equal <code class="inline">-P8</code>; the honest target is closing the gap, not erasing it.</td></tr>
+    </table>
+
+    <section id="overview">
+      <h2><span class="num">§</span>Overview</h2>
+      <p>The starting request was broad: read the whole codebase and understand it. That turned into a long-running investigation once real benchmark numbers came back showing a single-connection <code class="inline">iperf3</code> test topping out around 70-90 Mbps over a tunnel that eight parallel connections could push past 500 Mbps combined. Everything that follows is the process of figuring out why, what could close that gap, building the part of the fix that lived inside glorytun itself, and the two rounds of real-world testing — one local, one against a VPS several hundred kilometers away — that each caught something the other couldn't have.</p>
+    </section>
+
+    <section id="reading" class="wide">
+      <h2><span class="num">§</span>Reading the codebase first</h2>
+      <p style="max-width:74ch">Every source file was read in full before any conclusions: <code class="inline">mud/mud.c</code> (the transport — key exchange, AEAD, multipath scheduling, worker threads), <code class="inline">src/bind.c</code> and the rest of the CLI, <code class="inline">argz/</code>, and the existing docs. Two things stood out immediately:</p>
+      <div class="thread-grid">
+        <div class="card">
+          <h4>Docs described a design that was gone</h4>
+          <p><code class="inline">docs/architecture.md</code> and <code class="inline">docs/cli-reference.md</code> both still described an MTU <em>discovery</em> mechanism — binary search, <code class="inline">mtumin</code>/<code class="inline">mtumax</code> — that had been fully removed from the code. The actual behavior: one fixed, operator-set wire size per path, advertised to the peer, no probing at all. Both docs were rewritten to match.</p>
+        </div>
+        <div class="card">
+          <h4>The multipath scheduler is per packet</h4>
+          <p><code class="inline">mud_select_path()</code> picks a destination for every individual packet — a weighted-random draw across whatever paths are currently <code class="inline">running</code>, using the packet's own encrypted tail bytes as a free, uncoordinated source of randomness. This one fact turned out to explain almost everything that came later.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="the-question" class="wide">
+      <h2><span class="num">§</span>Why -P1 never matched -P8</h2>
+      <p style="max-width:74ch">Because scheduling is per packet, a <em>single</em> TCP flow's packets are already being scattered across every bonded path — connections or not. On a link where the two ISPs have different round-trip times, that scattering means packets routinely arrive at the far end out of the order they were sent: a packet that took the fast path overtakes one sent slightly earlier on the slow path. TCP has no way to tell that apart from real loss — it sees a gap in sequence numbers, fires duplicate ACKs, and throttles the connection via fast retransmit, even though nothing was actually dropped.</p>
+      <blockquote class="finding">
+        <span class="label">Why several flows don't have the same problem</span>
+        Every flow in an <code class="inline">-P8</code> test eats the identical reordering penalty individually — but running eight of them in parallel means their sum still saturates the link even while each one, alone, is throttled the same way a lone <code class="inline">-P1</code> flow is. The aggregate number was never proof that reordering wasn't happening; it was proof that parallelism papers over it.
+      </blockquote>
+    </section>
+
+    <section id="options" class="wide">
+      <h2><span class="num">§</span>The options on the table</h2>
+      <p style="max-width:74ch">Several distinct levers came up before any code was written, each aimed at a different point in the pipeline:</p>
+      <table class="states">
+        <tr><th>Lever</th><th>What it actually does</th><th>Where it landed</th></tr>
+        <tr><td><strong>BBR congestion control</strong></td><td>Grows throughput from a bandwidth/RTT model instead of cautiously creeping up only after surviving loss — far less punishing about the reordering TCP can't help seeing</td><td><span class="pill ok">Applied</span> on the real client/server, separate from glorytun</td></tr>
+        <tr><td><strong><code class="inline">tcp_reordering</code> sysctl</strong></td><td>Raises how many duplicate ACKs TCP tolerates before declaring loss</td><td><span class="pill neutral">Secondary</span> — supporting, not primary</td></tr>
+        <tr><td><strong><code class="inline">connections N</code> (already existed)</strong></td><td>Opens N independent UDP sub-flows per physical path — its real job is escaping <em>per-flow</em> ISP/hardware shaping, unlocking aggregate throughput</td><td><span class="pill neutral">Different problem</span> — doesn't touch single-flow reordering at all</td></tr>
+        <tr><td><strong>MPTCP (Option B)</strong></td><td>Expose both ISPs to the OS directly and let real Multipath TCP manage subflows, with in-kernel resequencing built for exactly this</td><td><span class="pill neutral">Noted, not built</span> — a materially bigger architecture change</td></tr>
+        <tr><td><strong>App-level parallel connections</strong></td><td><code class="inline">aria2c -x8 -s8</code> / <code class="inline">lftp pget -n8</code> — split one real download into several real connections</td><td><span class="pill ok">Recommended</span> as the pragmatic answer for real transfers</td></tr>
+        <tr><td><strong>Resequencing inside glorytun (Option A)</strong></td><td>Hold packets briefly on receive so they leave in send order, hiding the reordering from TCP entirely</td><td><span class="pill ok">Built</span> — see below</td></tr>
+      </table>
+    </section>
+
+    <section id="building" class="wide">
+      <h2><span class="num">§</span>Building the resequencing buffer</h2>
+      <p style="max-width:74ch">Option A landed inside <code class="inline">mud.c</code>: a small buffer on the receive side of <code class="inline">mud_worker_loop()</code> that holds a decrypted packet briefly, then releases it in send order instead of arrival order. Full detail — locking, wire-format reasoning, every iteration — lives in <code class="inline">glorytun-notes.html</code>'s <a href="#" onclick="return false" style="text-decoration:underline dotted">Packet resequencing</a> section; the shape of it here:</p>
+      <div class="thread-grid">
+        <div class="card">
+          <h4>No wire-protocol change</h4>
+          <p>The final design runs entirely on RTT this side already measures locally — no new field, no both-ends-must-upgrade requirement, safe to deploy on one end at a time like everything else in this fork.</p>
+        </div>
+        <div class="card">
+          <h4>Empirically tested, not just written</h4>
+          <p>WSL2, two network namespaces standing in for router and VPS, two <code class="inline">veth</code> pairs shaped with <code class="inline">tc netem</code> to real asymmetric RTTs, 16 real sub-flows — the same shape as the actual deployment, not a toy.</p>
+        </div>
+        <div class="card">
+          <h4>A bug the test caught, not the reasoning</h4>
+          <p>The first <code class="inline">mud_reorder_flush()</code> only sorted the first 32 ready packets it found — correct within a batch, silently wrong once more than one batch was ready at once. The first live run showed retransmits going <em>up</em> with the feature on. Fixed by sorting the complete ready set before releasing anything.</p>
+        </div>
+      </div>
+      <blockquote class="finding">
+        <span class="label">Local WSL result, ~8ms / ~34ms RTT paths</span>
+        Baseline (off): 94.8 Mbps, 1146 retransmits &nbsp;→&nbsp; <code class="inline">reorderwindow 25ms</code>: 81.1 Mbps, <strong>137 retransmits</strong> (88% fewer)
+      </blockquote>
+    </section>
+
+    <section id="first-round" class="wide">
+      <h2><span class="num">§</span>First real-hardware round</h2>
+      <p style="max-width:74ch">Moving off the simulated environment onto the user's actual OpenWRT router and VPS surfaced a sequence of smaller, very real mixups — the kind that only show up once real infrastructure and real habits are involved.</p>
+      <div class="thread-grid">
+        <div class="card">
+          <h4>Wrong side, wrong direction</h4>
+          <p>Resequencing only ever helps the <em>receiving</em> end of a transfer. The first real test enabled it on the sender's own daemon — silently doing nothing for that direction. Caught from the topology (which host was the <code class="inline">iperf3</code> client), not from the numbers.</p>
+        </div>
+        <div class="card">
+          <h4>"Is <code class="inline">connections N</code> round-robin?"</h4>
+          <p>No — weighted-random, seeded from each packet's own ciphertext bytes. Needs no shared counter across worker threads, which plain round-robin would.</p>
+        </div>
+        <div class="card">
+          <h4>What's actually parallel</h4>
+          <p>Every worker thread runs the <em>entire</em> pipeline — TUN I/O, crypto, path selection, socket I/O — not just encryption. Only tunnel-wide housekeeping (<code class="inline">mud_update()</code>, the control socket, netlink) stays on one thread, because it's cheap and infrequent, not because it was missed.</p>
+        </div>
+        <div class="card">
+          <h4>Why BBR outscored <code class="inline">connections N</code></h4>
+          <p>A single flow was already crossing both ISPs even with one sub-flow each — <code class="inline">connections N</code> never touches that. BBR and the resequencing buffer both attack the actual bottleneck directly; <code class="inline">connections N</code> was solving a different problem (ISP-side per-flow shaping) the user didn't clearly have.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="congestion" class="wide">
+      <h2><span class="num">§</span>Getting congestion control right</h2>
+      <p style="max-width:74ch">Congestion control is strictly end-to-end — it only runs on the machine that actually opened the TCP socket. A router or tunnel gateway forwarding traffic in between never touches it, no matter how many hops or tunnels the packets cross. This became its own small investigation once it turned out the <code class="inline">iperf3</code> server sometimes lived on a LAN device <em>behind</em> OpenWRT, not on OpenWRT itself — meaning BBR had to go on the real endpoint, not the router.</p>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">enabling BBR on OpenWRT (needs the kernel module first)</span></div>
+        <pre><span class="prompt">root@router:~#</span> opkg update && opkg install kmod-tcp-bbr
+<span class="prompt">root@router:~#</span> modprobe tcp_bbr
+<span class="prompt">root@router:~#</span> sysctl -w net.ipv4.tcp_congestion_control=bbr
+<span class="dim"># persist across reboot:</span>
+<span class="prompt">root@router:~#</span> echo tcp_bbr &gt;&gt; /etc/modules.d/30-tcp-bbr
+<span class="prompt">root@router:~#</span> echo "net.ipv4.tcp_congestion_control=bbr" &gt;&gt; /etc/sysctl.conf</pre>
+      </div>
+      <p style="max-width:74ch">Confirming it's actually active on a <em>live</em> connection (the sysctl only affects new sockets) — the <code class="inline">bbr:(bw:...,mrtt:...,pacing_gain:...)</code> block is the unambiguous tell:</p>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">ss -ti, mid-transfer, on whichever side is sending</span></div>
+        <pre>ESTAB 0 0 10.77.0.1:53012 10.77.0.2:5201
+	 <span class="ok-text">bbr</span> wscale:7,7 rto:204 rtt:2.921/1.5 ... pacing_rate 12.3Mbps delivery_rate 10.1Mbps
+	 bbr:(bw:83.2Mbps,mrtt:2.899,pacing_gain:2.77295,cwnd_gain:2.77295)</pre>
+      </div>
+    </section>
+
+    <section id="redesign" class="wide">
+      <h2><span class="num">§</span>The long-haul regression, and the fix</h2>
+      <p style="max-width:74ch">Testing against a VPS several hundred kilometers away (~154ms and ~210ms RTT on the two paths — a real ~28ms one-way skew, nothing like the local WSL test's 8-34ms) exposed a second, more serious problem in the original design: a flat delay applied identically to <em>every</em> packet, including ones on the already-slow path with nothing to wait for. At low RTT that flat tax was negligible; at 150ms+ it was a real, proportionally significant addition to every round trip.</p>
+      <blockquote class="finding">
+        <span class="label">The regression, caught live</span>
+        <code class="inline">reorderwindow 50ms</code> (flat): 35.5 Mbps, <strong>3074 retransmits</strong> — worse than doing nothing at all (baseline: 406 retransmits).
+      </blockquote>
+      <p style="max-width:74ch">The fix came from a question the user asked directly: <em>why hold packets on the slow path at all — only the fast one?</em> That reframed the whole mechanism. <code class="inline">mud_path.reorder_hold</code> is now recomputed every <code class="inline">mud_update()</code> tick from each path's <em>real measured RTT</em> relative to the tunnel's current slowest path — the slowest path gets zero hold and skips the buffer entirely; only genuinely faster paths pay a delay, proportional to their real speed advantage. <code class="inline">reorderwindow</code> stopped being the delay itself and became a safety ceiling on an automatic, per-path value.</p>
+      <blockquote class="finding">
+        <span class="label">Same ~154/210ms RTT paths, after the redesign</span>
+        Baseline (off), 3 runs: 23-32 Mbps &nbsp;→&nbsp; adaptive <code class="inline">reorderwindow 60ms</code>, 2 runs: <strong>33-39 Mbps</strong> — no longer a regression, trending toward a real improvement.
+      </blockquote>
+      <p style="max-width:74ch" class="note" style="color:var(--text-dim);font-size:0.9rem">Single-flow TCP at this RTT stayed genuinely noisy run to run even at the identical setting in a simulated network — the direction of the result is the finding here, not the exact percentage. Real hardware, with no virtualization noise floor underneath it, should read cleaner.</p>
+    </section>
+
+    <section id="status" class="wide">
+      <h2><span class="num">§</span>Where things stand</h2>
+      <table class="states">
+        <tr><th>Piece</th><th>State</th></tr>
+        <tr><td>Resequencing buffer (<code class="inline">reorderwindow</code>)</td><td><span class="pill ok">Built, redesigned, WSL-tested</span> — off by default, must be enabled explicitly per side</td></tr>
+        <tr><td>Auto-propagation like MTU</td><td><span class="pill crit">Deliberately not built</span> — it's a local policy decision, not a shared physical fact about the path; would also require an actual wire-protocol change, breaking the deploy-one-side-at-a-time guarantee</td></tr>
+        <tr><td>BBR</td><td><span class="pill warn">Needs applying on the real TCP endpoints</span> — not automatically part of glorytun, and not the tunnel routers unless they're also the real endpoints</td></tr>
+        <tr><td>Buffer capacity (<code class="inline">MUD_REORDER_MAX</code>)</td><td><span class="pill ok">Raised 512 → 4096</span> after the long-haul test showed 512 silently undersized past ~10ms of real headroom</td></tr>
+        <tr><td>Real-hardware validation</td><td><span class="pill warn">In progress</span> — WSL2 numbers are directional; the code has not yet been confirmed clean on the actual router/VPS pair</td></tr>
+      </table>
+    </section>
+
+    <section id="next" class="wide">
+      <h2><span class="num">§</span>Code → build → test</h2>
+      <ol class="checklist">
+        <li><span class="n">01</span><span><strong>Code</strong> — done. Three files hold the whole feature: <code class="inline">mud/mud.h</code>, <code class="inline">mud/mud.c</code>, <code class="inline">src/set.c</code>.</span></li>
+        <li><span class="n">02</span><span><strong>Build</strong> — same process as before on both machines, just newer source; OpenWRT through its existing SDK/feed pipeline, the VPS through the plain <code class="inline">Makefile</code>/<code class="inline">meson</code> build.</span></li>
+        <li><span class="n">03</span><span><strong>Restart both daemons</strong> — not a live-reloadable change; the reorder buffer is allocated in <code class="inline">mud_create()</code>.</span></li>
+        <li><span class="n">04</span><span><strong>Set <code class="inline">reorderwindow</code> on both sides</strong> — it no longer needs to be precise (it's a ceiling now), but it does need setting explicitly on each end, since it never propagates automatically.</span></li>
+        <li><span class="n">05</span><span><strong>Compare against a fresh baseline</strong> — restart with the feature off, measure, then re-enable and measure again. Watch <strong>retransmits</strong> as the more direct signal, not raw throughput alone.</span></li>
+      </ol>
+    </section>
+
+    <footer class="page-end">
+      Companion to <code class="inline">glorytun-notes.html</code>, which holds the code-level detail (locking, wire-format reasoning, full changelogs) this log only summarizes. This page is the narrative of one session; that one is the standing technical reference.
+    </footer>
+  </main>
+</div>

@@ -1,0 +1,1201 @@
+<!doctype html>
+<title>glorytun — field notes</title>
+<style>
+  :root {
+    --bg: #F6F4EF;
+    --surface: #ECE9E1;
+    --surface-2: #E2DDD0;
+    --text: #201D18;
+    --text-dim: #6B6357;
+    --accent: #B96E1F;
+    --accent-soft: #E7C39A;
+    --border: #DAD5C9;
+    --ok: #4B7A56;
+    --warn: #B96E1F;
+    --crit: #A8483A;
+    --code-bg: #FBFAF7;
+    --shadow: 0 1px 2px rgba(32,29,24,0.06), 0 8px 24px rgba(32,29,24,0.06);
+
+    --serif: Georgia, "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+    --sans: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "Consolas", "Liberation Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14181F;
+      --surface: #1B212A;
+      --surface-2: #232A35;
+      --text: #E8E6E1;
+      --text-dim: #8B93A1;
+      --accent: #E0A263;
+      --accent-soft: #4A3826;
+      --border: #2A303C;
+      --ok: #7FB88C;
+      --warn: #E0A263;
+      --crit: #D08276;
+      --code-bg: #10141A;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #14181F;
+    --surface: #1B212A;
+    --surface-2: #232A35;
+    --text: #E8E6E1;
+    --text-dim: #8B93A1;
+    --accent: #E0A263;
+    --accent-soft: #4A3826;
+    --border: #2A303C;
+    --ok: #7FB88C;
+    --warn: #E0A263;
+    --crit: #D08276;
+    --code-bg: #10141A;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--serif);
+    font-size: 17px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--accent); }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  h1, h2, h3 {
+    font-family: var(--serif);
+    text-wrap: balance;
+    font-weight: 600;
+    line-height: 1.2;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 240px minmax(0, 1fr);
+    gap: 0;
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+
+  /* ---------- sidebar ---------- */
+  nav.toc {
+    position: sticky;
+    top: 0;
+    align-self: start;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 2.5rem 1.25rem 2rem 1.5rem;
+    border-right: 1px solid var(--border);
+    font-family: var(--sans);
+  }
+  .toc .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin-bottom: 0.15rem;
+  }
+  .toc .brand-mark {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 1.05rem;
+    color: var(--accent);
+  }
+  .toc .brand-sub {
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .toc .fork-tag {
+    display: inline-block;
+    margin: 0.6rem 0 1.6rem;
+    font-size: 0.68rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--accent);
+    border: 1px solid var(--accent-soft);
+    background: var(--accent-soft);
+    padding: 0.2rem 0.5rem;
+    border-radius: 3px;
+  }
+  .toc ul {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 1.4rem;
+  }
+  .toc .group-label {
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin: 1.3rem 0 0.5rem;
+  }
+  .toc li a {
+    display: block;
+    padding: 0.28rem 0;
+    color: var(--text);
+    text-decoration: none;
+    font-size: 0.87rem;
+    border-left: 2px solid transparent;
+    padding-left: 0.6rem;
+    margin-left: -0.6rem;
+  }
+  .toc li a:hover {
+    color: var(--accent);
+    border-left-color: var(--accent-soft);
+  }
+  .toc li.sub a {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    padding-left: 1.2rem;
+  }
+
+  /* ---------- main ---------- */
+  main {
+    padding: 3rem clamp(1.25rem, 4vw, 4rem) 6rem;
+    min-width: 0;
+  }
+  main > header.intro {
+    max-width: 62ch;
+    margin-bottom: 3.5rem;
+  }
+  main > header.intro .eyebrow {
+    font-family: var(--sans);
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 0.8rem;
+  }
+  main > header.intro h1 {
+    font-size: clamp(2rem, 4vw, 2.6rem);
+    margin: 0 0 0.9rem;
+  }
+  main > header.intro p {
+    color: var(--text-dim);
+    font-size: 1.08rem;
+  }
+
+  section {
+    max-width: 74ch;
+    margin: 0 0 3.6rem;
+    scroll-margin-top: 1.5rem;
+  }
+  section.wide { max-width: 100%; }
+
+  section h2 {
+    font-size: 1.55rem;
+    margin: 0 0 0.3rem;
+    padding-top: 0.2rem;
+    border-top: 1px solid var(--border);
+    padding-top: 1.6rem;
+  }
+  section h2 .num {
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    color: var(--accent);
+    font-weight: 400;
+    margin-right: 0.6rem;
+  }
+  section .dek {
+    font-family: var(--sans);
+    color: var(--text-dim);
+    font-size: 0.95rem;
+    margin: 0 0 1.4rem;
+  }
+  section p { margin: 0 0 1.1rem; }
+  section ul, section ol { margin: 0 0 1.1rem; padding-left: 1.3rem; }
+  section li { margin-bottom: 0.4rem; }
+  section strong { color: var(--text); }
+  code.inline {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0.1em 0.35em;
+  }
+
+  /* ---------- command card ---------- */
+  .cmd {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    margin: 1.6rem 0;
+    overflow: hidden;
+    scroll-margin-top: 1.5rem;
+  }
+  .cmd-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    padding: 0.9rem 1.2rem;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .cmd-head code {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--accent);
+  }
+  .cmd-head .tag {
+    font-family: var(--sans);
+    font-size: 0.66rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ok);
+    border: 1px solid var(--ok);
+    border-radius: 3px;
+    padding: 0.12rem 0.4rem;
+    opacity: 0.85;
+  }
+  .cmd-head .tag.new {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .cmd-body { padding: 1.1rem 1.2rem 1.3rem; }
+  .cmd-body p { font-family: var(--sans); font-size: 0.92rem; color: var(--text); margin: 0 0 0.9rem; }
+  .cmd-body p:last-child { margin-bottom: 0; }
+  .cmd-body p.note { color: var(--text-dim); font-size: 0.85rem; }
+
+  /* ---------- terminal block ---------- */
+  .term {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    line-height: 1.55;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    overflow: hidden;
+    margin: 0.9rem 0;
+  }
+  .term-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.5rem 0.8rem;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .term-bar .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--border);
+  }
+  .term-bar .label {
+    font-family: var(--sans);
+    font-size: 0.68rem;
+    color: var(--text-dim);
+    margin-left: 0.4rem;
+    letter-spacing: 0.02em;
+  }
+  .term pre {
+    margin: 0;
+    padding: 0.9rem 1.1rem 1.05rem;
+    overflow-x: auto;
+    white-space: pre;
+    font-variant-numeric: tabular-nums;
+  }
+  .term .prompt { color: var(--text-dim); }
+  .term .arg { color: var(--accent); }
+  .term .ok-text { color: var(--ok); }
+  .term .warn-text { color: var(--warn); }
+  .term .crit-text { color: var(--crit); }
+  .term .dim { color: var(--text-dim); }
+
+  /* ---------- state table ---------- */
+  table.states {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--sans);
+    font-size: 0.86rem;
+    margin: 1rem 0 1.6rem;
+  }
+  table.states th {
+    text-align: left;
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding: 0.5rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+  }
+  table.states td {
+    padding: 0.55rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  table.states tr:last-child td { border-bottom: none; }
+  .pill {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    padding: 0.08rem 0.45rem;
+    border-radius: 3px;
+    border: 1px solid currentColor;
+  }
+  .pill.ok { color: var(--ok); }
+  .pill.warn { color: var(--warn); }
+  .pill.crit { color: var(--crit); }
+  .pill.neutral { color: var(--text-dim); }
+
+  /* ---------- architecture diagram (css, not svg) ---------- */
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0.6rem;
+    margin: 1.4rem 0 1.8rem;
+    font-family: var(--sans);
+  }
+  .flow .box {
+    flex: 1 1 130px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 0.75rem 0.85rem;
+  }
+  .flow .box b {
+    display: block;
+    font-size: 0.82rem;
+    margin-bottom: 0.25rem;
+  }
+  .flow .box span {
+    font-size: 0.76rem;
+    color: var(--text-dim);
+  }
+  .flow .arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 1.1rem;
+    padding: 0 0.1rem;
+  }
+
+  .thread-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.9rem;
+    margin: 1.3rem 0 1.8rem;
+    font-family: var(--sans);
+  }
+  .thread-grid .card {
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 1rem 1.1rem;
+    background: var(--surface);
+  }
+  .thread-grid .card h4 {
+    font-family: var(--sans);
+    font-size: 0.85rem;
+    margin: 0 0 0.4rem;
+    color: var(--accent);
+  }
+  .thread-grid .card p {
+    font-size: 0.83rem;
+    color: var(--text-dim);
+    margin: 0;
+  }
+
+  .changelog {
+    font-family: var(--sans);
+    font-size: 0.9rem;
+  }
+  .changelog .item {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: 1rem;
+    padding: 0.9rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .changelog .item:last-child { border-bottom: none; }
+  .changelog .item .file {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--accent);
+  }
+  .changelog .item p { margin: 0 0 0.4rem; color: var(--text); }
+  .changelog .item p:last-child { margin-bottom: 0; }
+
+  footer.page-end {
+    max-width: 74ch;
+    font-family: var(--sans);
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    border-top: 1px solid var(--border);
+    padding-top: 1.4rem;
+    margin-top: 2rem;
+  }
+
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc {
+      position: sticky;
+      top: 0;
+      height: auto;
+      max-height: none;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 1.25rem;
+      background: var(--bg);
+      z-index: 5;
+      display: flex;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      align-items: center;
+      gap: 1.2rem;
+    }
+    .toc .brand { flex-shrink: 0; }
+    .toc .fork-tag { display: none; }
+    .toc ul { display: flex; gap: 1.1rem; margin: 0; flex-shrink: 0; }
+    .toc .group-label { display: none; }
+    .toc li.sub { display: none; }
+    .toc li a { white-space: nowrap; padding: 0.2rem 0; }
+    main { padding: 2.2rem 1.25rem 4rem; }
+  }
+</style>
+
+<div class="layout">
+  <nav class="toc" aria-label="Table of contents">
+    <div class="brand">
+      <span class="brand-mark">glorytun</span>
+      <span class="brand-sub">field notes</span>
+    </div>
+    <span class="fork-tag">custom fork</span>
+
+    <div class="group-label">Orientation</div>
+    <ul>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#architecture">Architecture</a></li>
+      <li><a href="#threading">Threading model</a></li>
+      <li><a href="#health">Path health</a></li>
+      <li><a href="#mtu">Fixed MTU</a></li>
+      <li><a href="#subflows">UDP sub-flow bonding</a></li>
+      <li><a href="#reorder">Packet resequencing</a></li>
+    </ul>
+
+    <div class="group-label">Commands</div>
+    <ul>
+      <li><a href="#cmd-keygen">keygen</a></li>
+      <li><a href="#cmd-bind">bind</a></li>
+      <li><a href="#cmd-list">list</a></li>
+      <li><a href="#cmd-show">show</a></li>
+      <li><a href="#cmd-set">set</a></li>
+      <li><a href="#cmd-path">path</a></li>
+      <li class="sub"><a href="#cmd-path">— up / down</a></li>
+      <li class="sub"><a href="#cmd-path">— rtt / stat</a></li>
+      <li class="sub"><a href="#cmd-path">— watch</a></li>
+      <li class="sub"><a href="#cmd-path">— mtu</a></li>
+      <li><a href="#cmd-bench">bench</a></li>
+      <li class="sub"><a href="#cmd-bench">— multicore</a></li>
+      <li><a href="#cmd-version">version</a></li>
+    </ul>
+
+    <div class="group-label">Sessions</div>
+    <ul>
+      <li><a href="#changelog">MTU rewrite</a></li>
+      <li><a href="#changelog-subflows">Sub-flow bonding</a></li>
+      <li><a href="#changelog-reorder">Packet resequencing</a></li>
+    </ul>
+  </nav>
+
+  <main>
+    <header class="intro">
+      <div class="eyebrow">Reference — multipath encrypted tunnel</div>
+      <h1>glorytun</h1>
+      <p>A userspace VPN that opens a Linux TUN device on each end and carries traffic over one or more encrypted UDP paths — able to run several physical links (say, two PPPoE WANs) at once, live-tracking each one's health and shifting load as conditions change, and able to split a single link into several parallel UDP sub-flows to bond bandwidth on a long/high-RTT connection. These notes cover how it's built, what every command does, what its output looks like, and everything changed in this fork, session by session.</p>
+    </header>
+
+    <section id="overview">
+      <h2><span class="num">§</span>Overview</h2>
+      <p>Each side runs <code class="inline">glorytun bind</code>, which creates a TUN interface, opens a UDP socket, and begins exchanging encrypted packets — either AEGIS-256 with AES-NI/ARMv8-crypto hardware acceleration when available, or ChaCha20-Poly1305 as a software fallback. A path is one local/remote address pair, or on Linux, one physical interface (<code class="inline">via wwan0</code>) whose address and index are re-resolved automatically if it changes. Multiple paths can carry the same tunnel at once; each is tracked independently for round-trip time and packet loss, and traffic favors whichever paths are healthiest. A single path can also be split into several independent UDP sub-flows (<code class="inline">connections N</code>) — see <a href="#subflows">UDP sub-flow bonding</a>.</p>
+      <p>Everything else — <code class="inline">show</code>, <code class="inline">set</code>, <code class="inline">path</code> — talks to the running <code class="inline">bind</code> process over a local control socket, not the network.</p>
+    </section>
+
+    <section id="architecture" class="wide">
+      <h2><span class="num">§</span>Architecture</h2>
+      <p style="max-width:74ch">One packet's round trip through the stack, on the sending side:</p>
+      <div class="flow">
+        <div class="box"><b>TUN device</b><span>Your OS hands glorytun a plaintext IP packet</span></div>
+        <div class="arrow">→</div>
+        <div class="box"><b>Path select</b><span>Pick the healthiest path tied for best preference</span></div>
+        <div class="arrow">→</div>
+        <div class="box"><b>Encrypt</b><span>AEGIS-256 or ChaCha20-Poly1305, on the worker pool</span></div>
+        <div class="arrow">→</div>
+        <div class="box"><b>UDP socket</b><span>sendmsg() onto that path's interface/address</span></div>
+      </div>
+      <p style="max-width:74ch">A parallel channel of small "beat" messages (every 100ms by default, backing off to 25s once a path goes quiet) rides alongside real traffic to measure round-trip time, exchange real send/receive counters for loss accounting, and negotiate rate limits. Each beat also carries the sender's current fixed MTU purely as an informational value in the status output — nothing on the receiving side reacts to it or changes its own wire size because of it.</p>
+    </section>
+
+    <section id="threading" class="wide">
+      <h2><span class="num">§</span>Threading model</h2>
+      <p style="max-width:74ch">Only encryption/decryption is spread across cores. Everything else — socket I/O, path bookkeeping, rate and loss accounting — runs on a single thread by design.</p>
+      <div class="thread-grid">
+        <div class="card">
+          <h4>Main thread</h4>
+          <p>Runs the event loop: TUN read/write, UDP send/recv, path state machine, MTU probing, loss tracking. Also joins the crypto pool as a peer worker during batches — never idle while the pool works.</p>
+        </div>
+        <div class="card">
+          <h4>Worker pool</h4>
+          <p><code class="inline">min(cores − 1, 8)</code> threads, spawned once at startup. Asleep on a condition variable until a batch of packets needs encrypting or decrypting, then all wake, pull jobs from a shared counter, and sleep again.</p>
+        </div>
+        <div class="card">
+          <h4>Single-core fallback</h4>
+          <p>Zero threads spawned. The main thread does every job inline — same code path, no pool overhead paid for machinery that has nowhere to run in parallel.</p>
+        </div>
+      </div>
+      <p>Total participating threads on an <em>n</em>-core box is exactly <em>n</em> (capped at 9) — <em>n</em>−1 spawned workers plus the main thread, never <em>n</em>+1, which would oversubscribe the CPU for no benefit. See <code class="inline">bench multicore</code> below for a way to actually measure what this design costs in practice.</p>
+    </section>
+
+    <section id="health">
+      <h2><span class="num">§</span>Path health, rewritten this session</h2>
+      <p>Every path reports RTT and two loss figures per direction. All of it is derived from real packet counters — never a self-reported number taken on trust from the other end.</p>
+      <ul>
+        <li><strong>RTT</strong> — one number, not directional. Round-trip time of the beat-message exchange.</li>
+        <li><strong>TX-LOSS</strong> — of what <em>this side</em> sent, how much the <em>peer</em> confirms receiving. Computed locally from the peer's real receive counters, not trusted blindly.</li>
+        <li><strong>RX-LOSS</strong> — of what the <em>peer</em> sent, how much <em>this side</em> actually received. Also computed locally now — previously just copied the peer's own self-reported byte.</li>
+      </ul>
+      <p>Both loss figures come in two flavors: a <strong>stable</strong> value (60-second rolling window, drives the degraded/lossy decision) and a <strong>live</strong> value (fresh every ~1 second, shown on the status page). Neither one is fabricated from too little evidence — while a path has carried no real traffic in the last second, both values freeze at their last honest reading instead of coin-flipping between 0% and 100% off a single stray heartbeat.</p>
+      <p><code class="inline">glorytun path</code>'s <strong>STATUS</strong> column reads one of these, checked top-to-bottom — the first match wins:</p>
+      <table class="states">
+        <tr><th>status</th><th>meaning</th></tr>
+        <tr><td><span class="pill crit">interface-down</span></td><td>The <code class="inline">via</code> interface is down or gone (interface-managed paths only)</td></tr>
+        <tr><td><span class="pill warn">waiting-address</span></td><td>Interface is up, no usable address assigned yet</td></tr>
+        <tr><td><span class="pill neutral">down</span></td><td>You ran <code class="inline">path down</code></td></tr>
+        <tr><td><span class="pill neutral">deleting</span></td><td>Being torn down, or a passive path went silent 5 minutes</td></tr>
+        <tr><td><span class="pill crit">degraded</span></td><td>5 consecutive beats sent with zero replies</td></tr>
+        <tr><td><span class="pill warn">probing</span></td><td>Bootstrap value set the instant a path is created; superseded on the very next update tick by whatever status actually applies (usually <span class="pill ok" style="font-size:0.7rem">running</span> or <span class="pill neutral" style="font-size:0.7rem">waiting</span>), so it's rarely visible in practice. No MTU meaning — nothing is probed anymore.</td></tr>
+        <tr><td><span class="pill crit">lossy</span></td><td>Stable TX-LOSS or RX-LOSS exceeds the configured <code class="inline">losslimit</code></td></tr>
+        <tr><td><span class="pill warn">late</span></td><td>RTT exceeds the configured <code class="inline">rttlimit</code></td></tr>
+        <tr><td><span class="pill neutral">waiting</span></td><td>Passive path, no recent reply from peer</td></tr>
+        <tr><td><span class="pill ok">ready</span></td><td>Healthy, but a better-preferred path is active — this one is standby</td></tr>
+        <tr><td><span class="pill ok">running</span></td><td>Healthy and actively carrying traffic</td></tr>
+      </table>
+      <p class="note" style="font-family:var(--sans);color:var(--text-dim);font-size:0.88rem">More than one path can show <span class="pill ok" style="font-size:0.7rem">running</span> at once — every path tied at the best available preference carries traffic together, not just a single primary.</p>
+    </section>
+
+    <section id="mtu" class="wide">
+      <h2><span class="num">§</span>Fixed MTU — no discovery, and why it used to break</h2>
+      <p style="max-width:74ch"><strong>The old design</strong> found each path's usable packet size once, on convergence, by a binary search: probe near the top of a range, narrow based on whether the peer confirmed it, repeat. It never worked reliably — convergence routinely stalled, so the path effectively never left probing. Worse, the mechanism could look "settled" without being correct: every beat interval each side re-advertised its own last-confirmed size, and the peer mirrored it back into its own belief, so two peers could sit there mutually re-confirming a stale number forever, neither one ever re-testing it against the current real path.</p>
+      <p style="max-width:74ch">Separately, <code class="inline">mud_send_path()</code> incremented its sent-packet counters unconditionally, without checking whether <code class="inline">sendmsg()</code> actually succeeded. Combine the two: once the real path MTU shrank — a PPPoE renegotiation, a route change, a new hop mid-session — glorytun kept sending at the old, now-oversized size; the local kernel might reject it outright (<code class="inline">EMSGSIZE</code>), or a middlebox further out might silently swallow it (a PMTUD black hole, no local error at all). Either way TX-LOSS climbed because the peer never saw those packets — but the tiny beat/tracking messages stayed far under any realistic MTU, so <em>they</em> kept succeeding, keeping <code class="inline">STATUS</code> at <code class="inline">running</code> throughout. Control channel healthy, data channel silently dead.</p>
+
+      <p style="max-width:74ch"><strong>The fix: remove discovery entirely.</strong> Rather than patch a binary search that had never once reliably converged, every path now uses a single fixed wire size you set explicitly, or a safe built-in default if you don't. No probing, no negotiation, no state that can go stale — <code class="inline">mud_mtu_apply()</code> is the only place the value is ever decided, and it runs once whenever a path's config changes.</p>
+
+      <div class="thread-grid">
+        <div class="card">
+          <h4>Accounting fix (kept)</h4>
+          <p><code class="inline">mud_send_path()</code> only counts a send as sent when <code class="inline">sendmsg()</code> actually returned the full size. A failed send no longer inflates TX counters or consumes rate-limit budget — independent of the MTU redesign, still true today.</p>
+        </div>
+        <div class="card">
+          <h4>What was removed</h4>
+          <p><code class="inline">mud_update_mtu()</code>, <code class="inline">mud_mtu_reprobe()</code>, the min/max search range, the periodic 5-minute recheck, and the peer-mirroring belief exchange are gone from <code class="inline">mud.c</code> entirely — not disabled, deleted.</p>
+        </div>
+        <div class="card">
+          <h4>What replaced it</h4>
+          <p><code class="inline">struct mud_path_conf.mtu</code> — one <code class="inline">uint64_t</code>, 0 meaning "use the default." <code class="inline">mud_mtu_apply()</code> resolves it to <code class="inline">path->mtu</code>, clamped to <code class="inline">MUD_MTU_HARD_MAX</code>.</p>
+        </div>
+      </div>
+
+      <p style="max-width:74ch">Set it per path with <code class="inline">glorytun path up ... mtu N</code>. Leave it unset and the path uses <strong>1400</strong> (<code class="inline">MUD_MTU_DEFAULT</code> in <code class="inline">mud.c</code>) — conservative enough to survive standard PPPoE overhead and typical VPN-in-VPN encapsulation without any manual tuning. Whatever value ends up in effect is advertised to the peer in every beat purely as an informational figure in the status output; the receiving side never reacts to it or changes its own size because of it.</p>
+
+      <p style="max-width:74ch"><strong>The ceiling: <code class="inline">MUD_MTU_HARD_MAX</code>, now 65535.</strong> This used to be hard-locked at 1500 because the fixed packet buffers throughout <code class="inline">mud.c</code> were sized to exactly that, and a larger configured value would have overrun them — a real buffer overflow, not a policy choice. Rather than remove that check outright, the ceiling itself was raised to 65535 (UDP's own header length-field maximum) <em>and every dependent buffer was resized to match</em> — the heap-allocated batch job arrays in <code class="inline">mud.c</code> (<code class="inline">mud_send_job</code>/<code class="inline">mud_recv_job.packet[]</code>, ×256 slots each) and, separately, <code class="inline">src/bind.c</code>'s own <code class="inline">tx_buf</code>/<code class="inline">rx_buf</code> — the TUN-device read/write buffers, which had their own hardcoded <code class="inline">1500</code> literal, entirely disconnected from the library's constant. Fixing only <code class="inline">mud.c</code> and leaving that one alone would have just relocated the same overflow risk to a different file.</p>
+      <p style="max-width:74ch" class="note">One caveat worth knowing, not a bug: over IPv4 (this deployment's case) a UDP payload can't actually reach the full 65535 — the datagram still has to fit inside an IPv4 packet, whose own total-length field tops out at 65535 and has to include a 20-byte IPv4 header. The practical IPv4 ceiling is 65507. A configured value between 65508 and 65535 passes every check here but will fail at <code class="inline">sendmsg()</code> on an IPv4 path — kept as 65535 deliberately (UDP's own textbook maximum) rather than 65507, so the small dead zone is a known, documented tradeoff rather than an oversight.</p>
+      <p style="max-width:74ch">This raise costs real memory, paid once at startup regardless of what MTU you actually configure: the batch job arrays go from ~1.5MB combined to roughly <strong>~66MB</strong> (heap in <code class="inline">mud.c</code> plus static/BSS in <code class="inline">bind.c</code>), since 256 slots are now sized for a 65535-byte packet each instead of 1500. Trivial for a VPS, worth confirming headroom on a constrained router.</p>
+
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">setting a fixed MTU</span></div>
+        <pre><span class="prompt">root@joy:~#</span> glorytun path up dev gt0 to addr 163.61.39.45 port 5000 mtu 1400
+<span class="prompt">root@joy:~#</span> glorytun path up via wwan0 mtu 70000
+<span class="crit-text">Option mtu must be a number less than or equal to 65535</span></pre>
+      </div>
+
+      <p class="note" style="font-family:var(--sans);color:var(--text-dim);font-size:0.88rem">A separate, real finding along the way: on a CPU-constrained box, the kernel's UDP receive buffer can also overflow under load (confirmed via <code class="inline">nstat -az UdpRcvbufErrors UdpInErrors</code> showing a live, climbing count) and produces the same symptom — elevated RX-LOSS with no code bug involved. A <code class="inline">SO_RCVBUF</code> increase was tried and worked, then was reverted at request to isolate the MTU work above on its own — worth re-considering later if buffer drops show up again independently.</p>
+    </section>
+
+    <section id="subflows" class="wide">
+      <h2><span class="num">§</span>UDP sub-flow bonding — <code class="inline">connections N</code></h2>
+      <p style="max-width:74ch">Multipath already meant "two different physical WAN links carrying one tunnel" — each its own path, independently tracked, load-balanced by <code class="inline">mud_select_path()</code>. This applies the same idea <em>within</em> one physical link: split a single path into several independent UDP sub-flows (distinct local source ports, same interface) so a link with a long round-trip time isn't capped at whatever one flow's own bandwidth-delay product allows — the same reason <code class="inline">iperf3 -P4</code> outruns a single stream on a high-RTT connection, applied one layer below where a plain single TCP stream through the tunnel can see it.</p>
+      <p style="max-width:74ch">The fit turned out unusually clean. <code class="inline">mud_select_path()</code> already sprays outgoing packets across every <code class="inline">MUD_RUNNING</code> path, weighted by each one's live measured rate, with no idea which physical interface a path belongs to — nothing about it needed to change to also spray across sub-flows of one interface. Every path's rate/loss/RTT tracking was already fully independent per <code class="inline">struct mud_path</code>. And because a path's identity on receive already keyed on remote <em>port</em> as well as address, a peer sending from several distinct source ports was already, incidentally, causing the far side to auto-create one passive path per port — this feature just makes that intentional instead of a side effect nobody was relying on.</p>
+
+      <div class="thread-grid">
+        <div class="card">
+          <h4>What's new</h4>
+          <p>A <code class="inline">struct mud</code> instance now owns a small pool of local UDP sockets instead of exactly one — grown on demand, <code class="inline">realloc()</code>'d the same way <code class="inline">mud-&gt;paths</code> already is. <code class="inline">struct mud_path_conf.sock</code> picks which pool socket a path uses, and joins path-identity matching everywhere <code class="inline">local_ifindex</code>/<code class="inline">remote</code> already did.</p>
+        </div>
+        <div class="card">
+          <h4>What didn't need to change</h4>
+          <p>The AIMD rate controller, loss tracking, RTT, the crypto worker pool, and key exchange are all untouched — none of them have any concept of sockets, only of <code class="inline">struct mud_path</code>. <code class="inline">mud_select_path()</code> and the beat-cadence logic <em>did</em> end up touched, but only after real testing — see below.</p>
+        </div>
+        <div class="card">
+          <h4>What the peer needs</h4>
+          <p>Nothing. The passive side auto-discovers one path per distinct source port it observes, exactly like it already did. No upgrade, no config — and its own reverse-direction sends load-balance across those auto-discovered paths automatically too, since a passive path reaches <code class="inline">MUD_RUNNING</code> through the identical state machine an explicit path does.</p>
+        </div>
+      </div>
+
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">glorytun path up ... connections 4</span></div>
+        <pre><span class="prompt">root@joy:~#</span> glorytun path up via pppoe-ISP1_WAN connections 4 rate tx 10mbit rx 50mbit</pre>
+      </div>
+
+      <p style="max-width:74ch"><code class="inline">connections</code> requires <code class="inline">via IFACE</code> — rejected client-side for legacy <code class="inline">addr</code>-based paths, since only the interface-managed path table has anywhere durable to track and later shrink a sub-flow count across calls. Default is <code class="inline">1</code> (today's single-socket behavior, unchanged); <code class="inline">0</code>/unset leaves an existing path's count alone rather than resetting it. Shrinking a count later brings the excess sub-flows down the same way <code class="inline">path down</code> already does for a single path.</p>
+
+      <p style="max-width:74ch"><strong>The ceiling isn't a design opinion.</strong> <code class="inline">MUD_SOCK_MAX</code> is 256 — the range of <code class="inline">struct mud_path_conf.sock</code>, a single <code class="inline">unsigned char</code> — not a number picked for sounding reasonable. The pool grows to whatever <code class="inline">connections N</code> actually asks for, the same way <code class="inline">MUD_PATH_MAX</code> already grows <code class="inline">mud-&gt;paths</code> on demand.</p>
+
+      <p class="note" style="font-family:var(--sans);color:var(--text-dim);font-size:0.88rem">One real tradeoff, deliberately not fixed here: <code class="inline">bind</code>'s event loop still uses <code class="inline">select(2)</code>, which silently misbehaves once a tracked file descriptor's value reaches <code class="inline">FD_SETSIZE</code> (1024 on Linux). A handful to a few dozen sub-flows is fine on any normal process; requesting hundreds is where this would start to matter, and would call for switching to <code class="inline">poll()</code>/<code class="inline">epoll()</code> — out of scope here since it wasn't needed at the sizes this was actually built and asked for.</p>
+
+      <h3 style="margin-top:2rem;font-size:1.05rem">Two problems found working through what this implies in practice</h3>
+
+      <p style="max-width:74ch"><strong>1. Sub-flows were competing, not sharing.</strong> <code class="inline">mud_select_path()</code> weights selection by each path's <code class="inline">tx.rate</code> — correct for bonding two genuinely different-capacity physical links, wrong for sub-flows of <em>one</em> link, which have no real capacity difference from each other. Left alone, that's a rich-get-richer trap: whichever sub-flow(s) pull ahead early get selected more (selection weight <em>is</em> measured rate), which keeps their rate estimate growing while idle siblings never get real traffic to prove themselves against — risking most of the aggregate bandwidth quietly collapsing onto 1-2 sub-flows instead of spreading across all N.</p>
+      <p style="max-width:74ch">Fixed with a new <code class="inline">struct mud_path.select_weight</code>, recomputed every <code class="inline">mud_update()</code> tick by a new <code class="inline">mud_path_same_group()</code> helper: every <code class="inline">MUD_RUNNING</code> path sharing one physical link (same interface, or local address for legacy/passive paths — and same remote <em>address</em>, deliberately not remote port, since sub-flows vary by local port on the active side but by remote port on the passive side, which never opens extra sockets) gets weighted as its group's <em>average</em> <code class="inline">tx.rate</code> instead of its own. <code class="inline">mud_select_path()</code> now reads <code class="inline">select_weight</code>, splitting packets evenly within a group while still favoring whichever physical link has more real aggregate capacity between groups. <code class="inline">tx.rate</code> itself is untouched — still each sub-flow's genuine measured throughput for display and its own AIMD growth.</p>
+
+      <p style="max-width:74ch"><strong>2. Idle-looking sub-flows were going stale for up to 25 seconds.</strong> <code class="inline">mud_path_track()</code> backs a healthy path's beat cadence off from ~100ms to the global 25s <code class="inline">keepalive</code> once it's seen no traffic in the last second — sensible for a truly idle physical link, wrong for a sub-flow: with N of them splitting traffic, any individual one can look idle for a full second purely by chance while the link overall stays busy. Once backed off, its RTT/loss/rate only refresh when a beat reply is processed — so a `path watch` view that queries fresh every second was still showing genuinely stale per-sub-flow numbers underneath, and the sub-flow's <code class="inline">tx.rate</code> stopped being reassessed too, compounding problem 1.</p>
+      <p style="max-width:74ch">Fixed by having <code class="inline">mud_path_track()</code> skip the idle backoff entirely whenever <code class="inline">mud-&gt;sock_count &gt; 1</code> — the simpler of two options weighed, at the cost of also keeping a lone non-bonded path's beat at full cadence just because some other path on the same daemon happens to use sub-flows. The overhead (a handful of small beats per sub-flow per 100ms) is trivial on any link worth bonding in the first place.</p>
+
+      <h3 style="margin-top:2rem;font-size:1.05rem">Seeing whether a sub-flow is actually carrying anything</h3>
+      <p style="max-width:74ch">Neither <code class="inline">tx.rate</code> nor the fixes above answer "is this specific sub-flow being used right now" — <code class="inline">tx.rate</code> is glorytun's own AIMD-allowed budget, not a live usage meter; an idle sub-flow can sit at a healthy <code class="inline">tx.rate</code> long after it stopped carrying anything. <code class="inline">glorytun path</code> now computes a real observed rate entirely client-side instead: each refresh diffs this call's cumulative byte counters against the previous call's, over the actual wall-clock time elapsed, with no daemon or protocol change involved. New <code class="inline">tx</code>/<code class="inline">rx</code> fields on every sub-flow line make an unused one immediately obvious:</p>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">glorytun path watch — one idle sub-flow</span></div>
+        <pre><span class="dim">Every 1s: glorytun path   Ctrl+C to stop</span>
+
+pppoe-ISP1_WAN  index 23  103.86.175.108 -&gt; 2.27.157.112.5000
+  ├─ 0  <span class="ok-text">running</span>  tx 5.12Mbit  rx 4.01Mbit  rtt 3.064  tx-loss 0.00  rx-loss 1.18  tx-loss-live 0.00  rx-loss-live 0.39  mtu 1460  public 103.86.175.108.55853
+  ├─ 1  <span class="ok-text">running</span>  tx 0bit      rx 0bit      rtt 3.411  tx-loss 7.84  rx-loss 0.00  tx-loss-live 0.00  rx-loss-live 0.39  mtu 1460  public 103.86.175.108.41674
+<span class="dim">(remaining sub-flows omitted)</span></pre>
+      </div>
+      <p class="note">Requires two samples a second apart, so it only produces a real number in <code class="inline">watch</code> mode — a one-shot <code class="inline">glorytun path</code> query has nothing prior to diff against and shows <code class="inline">-</code>. Shown on the default and <code class="inline">stat</code> views, not <code class="inline">rtt</code>, which stays RTT-only on purpose.</p>
+    </section>
+
+    <section id="reorder" class="wide">
+      <h2><span class="num">§</span>Packet resequencing — <code class="inline">reorderwindow</code></h2>
+      <p style="max-width:74ch"><code class="inline">mud_select_path()</code> schedules per <em>packet</em>, weighted by measured capacity — not per flow. Every packet of a single TCP connection can land on a different physical path depending on which one the weighted walk picks that moment, and since paths differ in RTT, those packets routinely arrive out of order at the far end. TCP reads that as loss — duplicate ACKs, fast retransmit — and throttles itself, even though nothing was actually dropped. This is the reason one <code class="inline">iperf3</code> stream measures far below what several parallel streams add up to over the same bonded link: each stream individually eats the same reordering penalty, but running several in parallel lets their sum still saturate the link even while each one is throttled.</p>
+
+      <div class="thread-grid">
+        <div class="card">
+          <h4>The fix</h4>
+          <p>New <code class="inline">mud_conf.reorder_window</code>, off (<code class="inline">0</code>) by default. When set, <code class="inline">mud_worker_loop()</code>'s receive side briefly buffers decrypted data packets — tunnel-wide, across every path, since the reordering happens <em>between</em> paths — and releases them to the TUN device in send order instead of arrival order.</p>
+        </div>
+        <div class="card">
+          <h4>Adaptive per path, not one flat delay</h4>
+          <p>New <code class="inline">mud_path.reorder_hold</code>, recomputed every <code class="inline">mud_update()</code> tick from each path's <em>real measured RTT</em>: how much longer, relative to the tunnel's current slowest RUNNING path, a packet on <em>this specific path</em> needs to wait. The slowest path itself gets <code class="inline">0</code> and skips the buffer entirely — nothing can be behind it. <code class="inline">reorder_window</code> still caps it, but no longer <em>is</em> it. A second-round fix, not the original design — see below.</p>
+        </div>
+        <div class="card">
+          <h4>Worker-loop only</h4>
+          <p>Only <code class="inline">mud_worker_loop()</code>'s RX path is touched. The single-packet <code class="inline">mud_recv()</code>/<code class="inline">mud_send()</code> API — used directly by <code class="inline">mud/test.c</code>, bypassing worker threads entirely — is untouched by design, exactly as its own doc comment already promised.</p>
+        </div>
+      </div>
+
+      <p style="max-width:74ch">Each buffered packet gets a <code class="inline">deadline</code> fixed at the moment it's buffered: local arrival time plus that packet's own path's <code class="inline">reorder_hold</code> (capped by <code class="inline">reorder_window</code>). <code class="inline">mud_reorder_flush()</code> simply releases everything whose deadline has passed, sorted by deadline. No wire-protocol change was needed even for this: the whole scheme runs on RTT this side already measures locally (the same beat-message RTT <code class="inline">glorytun path</code> already shows) and never touches the peer's clock at all — a stronger version of the original design's promise, which still read the peer's own send-timestamp field. The buffer never blocks or drops a packet to make room: one that doesn't fit, or whose own path's hold caps to zero, is simply delivered immediately — exactly like every packet is with the feature off. Correctness never depends on this buffer; only the reordering benefit does.</p>
+
+      <p style="max-width:74ch"><strong>Two mutexes, doing different jobs.</strong> <code class="inline">lock</code> guards the buffer's own contents — plain memory access only, never held across a syscall, same discipline <code class="inline">state_lock</code> already follows elsewhere in <code class="inline">mud.c</code>. <code class="inline">flush_lock</code> is new territory for this file: it serializes the <em>entire</em> deliver-to-TUN phase across worker threads, not just the syscalls, because strict ordering requires that only one thread's batch of releases is ever in flight at a time — two threads flushing concurrently could otherwise interleave their own correctly-sorted batches with each other and reintroduce the exact reordering the buffer exists to remove.</p>
+
+      <h3 style="margin-top:2rem;font-size:1.05rem">Picking a ceiling, not a delay</h3>
+      <p style="max-width:74ch">Since <code class="inline">reorder_hold</code> is computed per path automatically now, <code class="inline">reorder_window</code> is a <strong>ceiling</strong>, not the delay itself — the actual hold applied to any given packet is <code class="inline">min(that path's computed reorder_hold, reorder_window)</code>. Set it too low and you clip the real computed skew back down to a flat delay again, reintroducing the exact problem the per-path design fixed; set it generously above the real skew and it costs nothing, since the system never holds a packet longer than its own path's real computed skew actually calls for. The math below is still useful for sizing that ceiling sensibly (and for building intuition for what the system is doing automatically), just no longer for picking an exact number to apply to everything. <code class="inline">glorytun path</code> gives you <strong>RTT</strong> — round-trip, there and back — but the number that matters here is the <em>one-way</em> gap between your two paths, which is roughly half the RTT gap between them:</p>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">the formula</span></div>
+        <pre>one-way skew ≈ (slower path's RTT − faster path's RTT) / 2</pre>
+      </div>
+      <p style="max-width:74ch">Read the two RTTs straight off <code class="inline">glorytun path</code>, one per physical <code class="inline">via</code> group — every sub-flow within one group rides the same physical link, so they'll all read close to each other; there's no need to compare all of them individually, one representative value per ISP is enough:</p>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">glorytun path — two ISPs, different RTT</span></div>
+        <pre>pppoe-ISP1_WAN  index 22  103.86.175.108 -&gt; 163.61.39.45.5000
+  ├─ 0  <span class="ok-text">running</span>  ...  rtt 20.412  ...
+  ├─ 1  <span class="ok-text">running</span>  ...  rtt 20.487  ...
+<span class="dim">(remaining sub-flows omitted — all close to 20ms)</span>
+
+pppoe-ISP2_WAN  index 26  10.15.157.100 -&gt; 163.61.39.45.5000
+  ├─ 0  <span class="ok-text">running</span>  ...  rtt 45.058  ...
+  ├─ 1  <span class="ok-text">running</span>  ...  rtt 45.359  ...
+<span class="dim">(remaining sub-flows omitted — all close to 45ms)</span></pre>
+      </div>
+
+      <div class="thread-grid">
+        <div class="card">
+          <h4>Example A — similar ISPs</h4>
+          <p>15ms and 18ms RTT. Skew = (18 − 15) / 2 = <strong>1.5ms</strong>. Barely any gap to cover — a small window (5-10ms) is plenty, or reordering was never really your bottleneck here.</p>
+        </div>
+        <div class="card">
+          <h4>Example B — realistic dual-ISP</h4>
+          <p>20ms and 45ms RTT. Skew = (45 − 20) / 2 = <strong>12.5ms</strong>. Start around <strong>20ms</strong> — a bit above the raw number.</p>
+        </div>
+        <div class="card">
+          <h4>Example C — fiber + 4G/satellite backup</h4>
+          <p>10ms and 120ms RTT. Skew = (120 − 10) / 2 = <strong>55ms</strong>. Start around <strong>70-80ms</strong> — but that's real latency added to <em>everything</em> on the tunnel just to smooth one especially slow path, worth questioning whether that path belongs in the bond at all versus kept as pure backup.</p>
+        </div>
+      </div>
+
+      <p style="max-width:74ch" class="note">Pad above the raw skew number when setting the ceiling — real links jitter, especially under the load that makes this matter most, and since the ceiling costs nothing when it isn't the binding constraint, there's little reason to shave it close. Watch <strong>Retr</strong> (retransmits) on a real transfer more than raw throughput to judge whether it's doing its job — it's the more direct signal of whether reordering-triggered false loss is actually being removed.</p>
+
+      <h3 style="margin-top:2rem;font-size:1.05rem">A bug that only real testing caught</h3>
+      <p style="max-width:74ch">The first implementation capped the readiness scan at 32 entries per pass — sort whatever's found, ship it, repeat. That sorts correctly <em>within</em> one batch of 32, but under real sustained throughput, well over 32 packets are routinely ready to release at once, scattered through the buffer in whatever order they happened to be inserted — not sent-time order. The scan would stop at the first 32 it found in array order, sort <em>those</em> correctly, and defer anything with a smaller <code class="inline">sent_time</code> that just hadn't been scanned yet to a later pass — releasing it <em>after</em> packets that were actually sent later. Sorted per batch, but not globally. This was caught, not reasoned around: the very first live test showed retransmits going <em>up</em> with the feature on (197 → 1412), the opposite of the point of building it. Fixed by scanning and sorting the <em>complete</em> ready set before releasing anything, then chunking only the data-copy/delivery step afterward for bounded stack usage — the sort establishes the order once, chunking never gets to disturb it.</p>
+
+      <h3 style="margin-top:2rem;font-size:1.05rem">Actually built and run this time</h3>
+      <p style="max-width:74ch">Unlike the sessions below, this one wasn't just written and left uncompiled (see the closing note on this page) — it was built and tested end to end in WSL2: two network namespaces standing in for the router and the VPS, joined by two <code class="inline">veth</code> pairs shaped with <code class="inline">tc netem</code> to roughly 8ms and 34ms RTT — deliberately asymmetric, matching a real dual-ISP setup — each capped at 300mbit, with <code class="inline">connections 8</code> per path (16 real sub-flows), the same shape as a real deployment.</p>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">single-flow iperf3, fresh daemon restart per condition</span></div>
+        <pre><span class="dim">baseline (reorderwindow off)      94.8 Mbps    1146 retransmits
+reorderwindow 25ms                81.1 Mbps     137 retransmits   (88% fewer)</span></pre>
+      </div>
+      <p style="max-width:74ch" class="note">Throughput moved in both directions across repeated runs — WSL2/<code class="inline">netem</code> itself turned out noisy under 16 concurrent shaped UDP sub-flows (individual sub-flows intermittently showing real loss with the feature <em>off</em>, one transient <code class="inline">iperf3</code> control-connection reset, neither reproducible on retry) — but the retransmit-count drop was large and consistent in every clean run. That's the more direct signal of whether this mechanism is doing its job at all, since it's what the feature specifically targets; the noisier throughput numbers are believed to reflect the simulated environment, not the code, and real hardware should read cleaner on both counts.</p>
+      <p style="max-width:74ch" class="note"><strong>One real-world mixup worth recording:</strong> resequencing only ever helps the <em>receiving</em> side of a given transfer — the sender doesn't reorder anything, it only stripes packets out. Set on the wrong end (the sender's own daemon) it silently does nothing for that direction. First real-hardware test enabled it on the wrong side for exactly this reason before the mistake was caught from the topology, not the numbers.</p>
+
+      <h3 style="margin-top:2rem;font-size:1.05rem">A flat window doesn't survive contact with a real long-haul path</h3>
+      <p style="max-width:74ch">The local WSL2 test above ran at 8-34ms RTT. Testing against a real VPS several hundred km away (~154ms and ~210ms RTT on the two paths, a ~28ms real one-way skew) exposed something the local test never could: the original flat-window design applies the <em>same</em> delay to every packet, including ones on the already-slow path that have nothing to wait for. At low RTT that flat tax is negligible next to the real transit time; at 150-200ms+ RTT it's a real, proportionally significant addition to every round trip — and a <code class="inline">reorderwindow</code> approaching the housekeeping loop's own ~100ms poll cadence introduced a second problem on top: release timing became inconsistent (some packets flushed quickly on real traffic, others waiting a full poll cycle), and that inconsistency in delay is exactly the kind of thing that confuses TCP's own RTO estimate.</p>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">flat window, ~154/210ms RTT paths, single flow</span></div>
+        <pre><span class="dim">baseline (off)                    32-41 Mbps    406-1596 retransmits (noisy)
+flat reorderwindow 20ms           24.9 Mbps        46 retransmits   (throughput down)
+flat reorderwindow 50ms           35.5 Mbps      3074 retransmits   (worse than baseline)</span></pre>
+      </div>
+      <p style="max-width:74ch">50ms made retransmits <em>worse</em> than doing nothing at all — the opposite of the point, and the second time this feature has been caught regressing by a live test rather than by reasoning about the code (see the batch-scan bug above). The fix wasn't a bigger or smaller flat number -- it was recognizing the flat delay itself was the wrong shape: <code class="inline">mud_path.reorder_hold</code> now makes the delay adaptive per path, computed from real measured RTT (see the redesign described above), so a packet on the already-slowest path pays nothing at all, and only genuinely faster paths pay a delay proportional to their real speed advantage.</p>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">adaptive per-path hold, same ~154/210ms RTT paths, 60ms ceiling</span></div>
+        <pre><span class="dim">baseline (off), 3 runs             23-32 Mbps      406-1596 retransmits
+adaptive reorderwindow 60ms, 2 runs 33-39 Mbps    1100-1165 retransmits</span></pre>
+      </div>
+      <p style="max-width:74ch" class="note">No longer a regression -- trending toward a real ~35% throughput improvement across repeated runs, though single-flow TCP at this RTT stays inherently noisy in a simulated network even run to run at the <em>same</em> setting, so treat the direction as the finding, not the exact percentage. The idea for the adaptive redesign -- "why hold packets on the slow path at all, only the fast one" -- came from the user, not from re-reasoning about the code; the flat-window regression on its own hadn't obviously pointed at that particular fix.</p>
+
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">glorytun set ... reorderwindow 20ms</span></div>
+        <pre><span class="prompt">root@joy:~#</span> glorytun set dev gt0 reorderwindow 20ms
+set dev gt0 kxtimeout 1h timetolerance 10m keepalive 25s reorderwindow 20ms</pre>
+      </div>
+      <p class="note">Same convention as <code class="inline">keepalive</code>/<code class="inline">timetolerance</code>/<code class="inline">kxtimeout</code>: <code class="inline">0</code> means "leave unchanged," not "disable" — once set, it can only be raised to a new value through this command, never reset back to <code class="inline">0</code> without restarting the daemon.</p>
+    </section>
+
+    <!-- ============ COMMANDS ============ -->
+
+    <section id="cmd-keygen">
+      <h2><span class="num">§</span>Commands</h2>
+      <div class="dek">Every subcommand, what it does, and what typing it actually shows you.</div>
+
+      <div class="cmd">
+        <div class="cmd-head"><code>glorytun keygen</code></div>
+        <div class="cmd-body">
+          <p>Generates a new secret key and writes it to stdout (or a file). Both ends of a tunnel share the same key.</p>
+          <div class="term">
+            <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">keygen &gt; gt.key</span></div>
+            <pre><span class="prompt">root@joy:~#</span> glorytun keygen &gt; gt.key
+<span class="prompt">root@joy:~#</span> cat gt.key
+<span class="dim">f3a1c9...e207b4  (64 hex chars, 32-byte key)</span></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="cmd-bind">
+      <div class="cmd">
+        <div class="cmd-head">
+          <code>glorytun bind [dev NAME] [addr LOCAL_IP [PORT]] keyfile FILE [persist] [chacha] [qlen N]</code>
+          <span class="tag new">qlen is new</span>
+        </div>
+        <div class="cmd-body">
+          <p>Starts the tunnel: creates/attaches the TUN device (on Linux, attaches to a pre-existing device of that name if one exists), opens the UDP socket, and runs the event loop until stopped. Runs in the foreground.</p>
+          <p><code class="inline">persist</code> keeps the Linux TUN device alive when the process exits — useful with <code class="inline">via</code>-bound paths so netifd doesn't flap the interface across a crash/respawn. <code class="inline">chacha</code> forces the ChaCha20-Poly1305 fallback instead of negotiating AEGIS-256. <code class="inline">qlen</code> sets the TUN device's tx queue length (<code class="inline">txqueuelen</code>) once at startup — Linux defaults TUN/TAP interfaces to 500 (vs. 1000 for a typical Ethernet interface); raise it if real bulk traffic through the tunnel could burst past that. Unlike <code class="inline">mtu</code> on <code class="inline">path up</code>, this is a one-time value applied once when the interface is created, not something that needs to keep tracking path config afterward.</p>
+          <div class="term">
+            <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">server</span></div>
+            <pre><span class="prompt">root@joy:~#</span> glorytun bind <span class="arg">dev gt0 keyfile /etc/glorytun/gt.key from addr 0.0.0.0 port 5000 qlen 1000</span>
+<span class="dim">(runs in the foreground until Ctrl+C / SIGTERM)</span></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="cmd-list">
+      <div class="cmd">
+        <div class="cmd-head"><code>glorytun list</code></div>
+        <div class="cmd-body">
+          <p>Prints the device name of every running tunnel discoverable in the current control-socket directory.</p>
+          <div class="term">
+            <pre><span class="prompt">root@joy:~#</span> glorytun list
+gt0
+gt1</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="cmd-show">
+      <div class="cmd">
+        <div class="cmd-head"><code>glorytun show [dev NAME] [errors]</code></div>
+        <div class="cmd-body">
+          <p>Prints tunnel-level configuration (keepalive, timetolerance, kxtimeout). The <code class="inline">dev</code> selector is only required when more than one tunnel is running.</p>
+          <div class="term">
+            <pre><span class="prompt">root@joy:~#</span> glorytun show dev gt0
+dev gt0 keepalive 25s timetolerance 10m kxtimeout 1h</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="cmd-set">
+      <div class="cmd">
+        <div class="cmd-head">
+          <code>glorytun set [dev NAME] [kxtimeout T] [timetolerance T] [keepalive T] [reorderwindow T]</code>
+          <span class="tag new">reorderwindow is new</span>
+        </div>
+        <div class="cmd-body">
+          <p>Changes tunnel-level properties on a running <code class="inline">bind</code> process.</p>
+          <div class="term">
+            <pre><span class="prompt">root@joy:~#</span> glorytun set dev gt0 kxtimeout 1h timetolerance 10m keepalive 10s</pre>
+          </div>
+          <p><code class="inline">reorderwindow</code> — see <a href="#reorder">Packet resequencing</a>. Off by default; only affects the receiving side of whatever traffic you're trying to help.</p>
+          <div class="term">
+            <pre><span class="prompt">root@joy:~#</span> glorytun set dev gt0 reorderwindow 20ms</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="cmd-path" class="wide">
+      <div class="cmd">
+        <div class="cmd-head">
+          <code>glorytun path [via IFACE | addr IP] [rtt | stat] [watch] [up|down ... mtu N] [connections N]</code>
+          <span class="tag new">connections is new; status view rewritten to group sub-flows under their path</span>
+        </div>
+        <div class="cmd-body">
+          <p>Shows or changes path status. <code class="inline">path up via wwan0 rate tx 10mbit</code> configures a path by durable interface name rather than a local IP that can change under it — the interface's current index/address is re-resolved automatically. <code class="inline">rtt</code> and <code class="inline">stat</code> switch to narrower, focused views; the default view (below) is the one with the <code class="inline">mtu</code>/<code class="inline">public</code> fields.</p>
+
+          <p class="note">The status view is grouped now, not a flat table: one header line per physical path (<code class="inline">IFACE  index N  LOCAL -&gt; REMOTE</code>), then one indented, tree-connector-prefixed line per sub-flow underneath it. Every path has at least one sub-flow (<code class="inline">connections</code> defaults to <code class="inline">1</code>), so this applies whether or not you've ever touched <code class="inline">connections</code> — a plain single-flow path just renders as a one-line group. Fields on each sub-flow line are self-labeled (<code class="inline">rtt 2.767</code>, not a padded column), since <code class="inline">IFACE</code>/<code class="inline">LOCAL</code>/<code class="inline">REMOTE</code> would otherwise repeat identically across every sub-flow of one path.</p>
+
+          <div class="term">
+            <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">default view — dual PPPoE WAN, one sub-flow each, one-shot (no watch)</span></div>
+            <pre>pppoe-ISP1_WAN  index 22  103.86.175.108 -&gt; 163.61.39.45.5000
+  └─ 0  <span class="ok-text">running</span>  tx -  rx -  rtt 2.767  tx-loss 0.02  rx-loss 0.01  tx-loss-live 0.00  rx-loss-live 0.00  mtu 1400  public 103.86.175.108.51766
+
+pppoe-ISP2_WAN  index 26  10.15.157.100 -&gt; 163.61.39.45.5000
+  └─ 0  <span class="ok-text">running</span>  tx -  rx -  rtt 4.877  tx-loss 0.00  rx-loss 0.00  tx-loss-live null  rx-loss-live null  mtu 9000  public 103.212.146.38.35454</pre>
+          </div>
+
+          <p class="note">TX-LOSS/RX-LOSS are the stable 60s figures that actually drive STATUS. TX-LOSS-LIVE/RX-LOSS-LIVE update roughly every second and print <code class="inline">null</code> — not <code class="inline">0.00</code> — whenever that sub-flow has carried no real traffic in the last second, so a quiet one never reads as falsely perfect. <code class="inline">mtu</code> is just the fixed wire size in effect — ISP1 never set one so it's using the 1400 default, ISP2 was explicitly configured to 9000. It's a plain reported number, not a live negotiation to watch. <code class="inline">tx</code>/<code class="inline">rx</code> show <code class="inline">-</code> here because this is a one-shot query — that pair needs two samples a second apart to compute anything, so it only ever shows real numbers under <code class="inline">watch</code> (below).</p>
+
+          <p style="margin-top:1.3rem"><strong>connections</strong> — splits a path into that many parallel UDP sub-flows for bandwidth aggregation on a long/high-RTT link; see <a href="#subflows">UDP sub-flow bonding</a> for why and how. Requires <code class="inline">via</code>. Here's the same ISP1 link from above, now with <code class="inline">connections 4</code>, watched for a few seconds — four independently tracked rows instead of one, and <code class="inline">tx</code>/<code class="inline">rx</code> make it obvious sub-flow 1 isn't carrying anything right now:</p>
+          <div class="term">
+            <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">glorytun path up via pppoe-ISP1_WAN connections 4, then watch</span></div>
+            <pre>pppoe-ISP1_WAN  index 22  103.86.175.108 -&gt; 163.61.39.45.5000
+  ├─ 0  <span class="ok-text">running</span>  tx 5.12Mbit  rx 4.01Mbit  rtt 2.767  tx-loss 0.02  rx-loss 0.01  tx-loss-live 0.00  rx-loss-live 0.00  mtu 1400  public 103.86.175.108.51766
+  ├─ 1  <span class="ok-text">running</span>  tx 0bit      rx 0bit      rtt 2.811  tx-loss 0.00  rx-loss 0.00  tx-loss-live 0.00  rx-loss-live 0.00  mtu 1400  public 103.86.175.108.52210
+  ├─ 2  <span class="ok-text">running</span>  tx 4.88Mbit  rx 3.94Mbit  rtt 2.792  tx-loss 0.00  rx-loss 0.02  tx-loss-live 0.00  rx-loss-live 0.00  mtu 1400  public 103.86.175.108.52988
+  └─ 3  <span class="ok-text">running</span>  tx 5.03Mbit  rx 4.12Mbit  rtt 2.734  tx-loss 0.00  rx-loss 0.00  tx-loss-live 0.00  rx-loss-live 0.00  mtu 1400  public 103.86.175.108.53401
+
+pppoe-ISP2_WAN  index 26  10.15.157.100 -&gt; 163.61.39.45.5000
+  └─ 0  <span class="ok-text">running</span>  tx 6.41Mbit  rx 5.20Mbit  rtt 4.877  tx-loss 0.00  rx-loss 0.00  tx-loss-live null  rx-loss-live null  mtu 9000  public 103.212.146.38.35454</pre>
+          </div>
+          <p class="note">Each sub-flow gets its own source port (visible in <code class="inline">public</code>) and its own independently-measured RTT/loss/rate — that independence is what actually lets the four of them aggregate more bandwidth than one flow could alone, not just the fact that there are four of them. <code class="inline">tx</code>/<code class="inline">rx</code> here are a real observed rate, computed client-side by diffing byte counters between refreshes — not <code class="inline">tx.rate</code>/<code class="inline">rx.rate</code>, which are glorytun's own AIMD-allowed budget and would <em>not</em> have caught sub-flow 1 sitting idle. See <a href="#subflows">UDP sub-flow bonding</a>.</p>
+
+          <p style="margin-top:1.3rem"><strong>watch</strong> — refreshes the same view in place every second until Ctrl+C, instead of printing once and exiting. Works with any view: <code class="inline">path watch</code>, <code class="inline">path stat watch</code>, <code class="inline">path rtt watch</code>.</p>
+          <div class="term">
+            <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">glorytun path watch</span></div>
+            <pre><span class="dim">Every 1s: glorytun path   Ctrl+C to stop</span>
+
+pppoe-ISP1_WAN  index 22  103.86.175.108 -&gt; 163.61.39.45.5000
+  └─ 0  <span class="ok-text">running</span>  tx 5.09Mbit  rx 4.05Mbit  rtt 2.812  tx-loss 0.02  rx-loss 0.01  tx-loss-live 0.01  rx-loss-live 0.00  mtu 1400  public 103.86.175.108.51766
+
+pppoe-ISP2_WAN  index 26  10.15.157.100 -&gt; 163.61.39.45.5000
+  └─ 0  <span class="ok-text">running</span>  tx 6.38Mbit  rx 5.15Mbit  rtt 4.901  tx-loss 0.03  rx-loss 0.00  tx-loss-live 0.00  rx-loss-live null  mtu 9000  public 103.212.146.38.35454
+<span class="dim">(clears and redraws in place, once a second)</span></pre>
+          </div>
+
+          <p style="margin-top:1.3rem"><strong>mtu</strong> — sets the fixed wire size a path uses. Optional; see <a href="#mtu">Fixed MTU</a> for the default and the ceiling. Replaces the old <code class="inline">mtumin</code>/<code class="inline">mtumax</code> search-range flags, which no longer exist — there's nothing left to search.</p>
+          <div class="term">
+            <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">glorytun path up ... mtu 1400</span></div>
+            <pre><span class="prompt">root@joy:~#</span> glorytun path up dev gt0 to addr 163.61.39.45 port 5000 mtu 1400
+path dev gt0 addr 163.61.39.45 to addr 163.61.39.45 port 5000 set up pref 0 beat 100ms losslimit 0% rttlimit off mtu 1400 rate auto tx 0bps rx 0bps</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="cmd-bench" class="wide">
+      <div class="cmd">
+        <div class="cmd-head">
+          <code>glorytun bench [fallback] [multicore]</code>
+          <span class="tag new">multicore is new</span>
+        </div>
+        <div class="cmd-body">
+          <p>Pure crypto microbenchmark — never touches the network, TUN device, or worker pool. <code class="inline">fallback</code> benches ChaCha20-Poly1305 instead of AEGIS-256.</p>
+
+          <div class="term">
+            <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">glorytun bench — single core</span></div>
+            <pre>bench aegis256
+  size       min           mean            max
+----------------------------------------------------
+    20      4102 Mbps      4210 Mbps      4295 Mbps
+   150      6480 Mbps      6602 Mbps      6710 Mbps
+   ⋮
+  1450      9350 Mbps      9480 Mbps      9601 Mbps</pre>
+          </div>
+
+          <p style="margin-top:1.3rem"><strong>multicore</strong> — runs two comparisons per size over the same core count the real tunnel's worker pool would use: an independent <em>ceiling</em> (every thread encrypting flat-out, no shared state — the theoretical max) against glorytun's actual <em>pool</em> pattern (threads sharing one mutex-guarded job counter, mirroring the real worker pool exactly). The gap between them is glorytun's own coordination cost, made visible instead of theoretical.</p>
+          <div class="term">
+            <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">glorytun bench multicore</span></div>
+            <pre>bench aegis256 multicore (8 threads)
+  size        ceiling             pool          overhead
+---------------------------------------------------------
+    20      31200 Mbps       27400 Mbps            12%
+   150      48600 Mbps       44900 Mbps             8%
+   ⋮
+  1450      71100 Mbps       68800 Mbps             3%</pre>
+          </div>
+          <p class="note">Overhead shrinks as packet size grows — makes sense, since the lock is held for a fixed sliver of time per job regardless of how much crypto work that job does.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="cmd-version">
+      <div class="cmd">
+        <div class="cmd-head">
+          <code>glorytun version</code>
+          <span class="tag new">simplified</span>
+        </div>
+        <div class="cmd-body">
+          <p>Prints the tool and libsodium versions, one per line.</p>
+          <div class="term">
+            <pre><span class="prompt">root@joy:~#</span> glorytun version
+glorytun 1.0
+libsodium 10.3</pre>
+          </div>
+          <p class="note">The glorytun version is now a literal in <code class="inline">src/version.c</code> — no longer derived from git tags or a VERSION file, so it reads correctly even when built from a source tarball with no git metadata (the common case for OpenWrt package builds).</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="cmd-toplevel" class="wide">
+      <div class="cmd">
+        <div class="cmd-head"><code>glorytun</code> <span class="tag new">listing updated</span></div>
+        <div class="cmd-body">
+          <p>Bare invocation now surfaces the new sub-features directly, instead of only being discoverable via <code class="inline">&lt;command&gt; help</code>.</p>
+          <div class="term">
+            <pre><span class="prompt">root@joy:~#</span> glorytun
+  option                     description
+  list                       List all tunnels
+  show                       Show tunnel information
+  bench                      Start a crypto bench
+  bench multicore            Bench aggregate multi-core crypto throughput
+  bench multicore fallback   Same, using the ChaCha20 fallback cipher
+  bind                       Start a new tunnel
+  bind qlen                  Set the tun device's tx queue length, e.g. bind qlen 1000 (default is the kernel's own)
+  set                        Change tunnel properties
+  keygen                     Generate a new secret key
+  path                       Manage paths
+  path watch                 Live-refresh path status every second
+  path mtu                   Set the fixed MTU to use, e.g. path up mtu 1400 (default 1400, no probing)
+  path connections           Parallel UDP sub-flows for one path, e.g. path up via wan0 connections 4 (default 1, requires via)
+  version                    Show version</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ CHANGELOG ============ -->
+
+    <section id="changelog" class="wide">
+      <h2><span class="num">§</span>What changed this session</h2>
+      <div class="dek">Everything modified in this fork, by file.</div>
+      <div class="changelog">
+        <div class="item">
+          <div class="file">mud/mud.h<br>mud/mud.c</div>
+          <div>
+            <p><strong>RX-LOSS no longer trusted from the peer.</strong> Previously copied the peer's self-reported loss byte directly; now derived locally from the peer's real tx counters (already sent in every message) against this side's own real rx counters — same standard TX-LOSS already used.</p>
+            <p><strong>Loss tracking rebuilt around a 60-slot, 1-second-bucket ring buffer</strong> (<code class="inline">mud_loss_track</code>/<code class="inline">mud_update_loss</code>), replacing a packet-count-gated accumulator that decayed by only 1/16 per update and never fully reset — the likely cause of stale, inflated loss readings on real links. Produces a stable 60s rolling figure (drives <code class="inline">MUD_LOSSY</code>) and a live 1s figure (status display) from the same real counts.</p>
+            <p><strong><code class="inline">path-&gt;traffic_idle</code></strong>, refreshed every update tick from the existing <code class="inline">path-&gt;idle</code> signal: while a path carries no real traffic, loss values freeze at their last reading instead of computing a percentage from a single sparse heartbeat.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/path.c</div>
+          <div>
+            <p>Status table gained <code class="inline">TX-LOSS-LIVE</code>/<code class="inline">RX-LOSS-LIVE</code> columns (print <code class="inline">null</code> while idle); the original <code class="inline">TX-LOSS</code>/<code class="inline">RX-LOSS</code> columns now show the stable value again.</p>
+            <p>Added the <code class="inline">watch</code> flag: refreshes any view every second until Ctrl+C, reusing the existing <code class="inline">gt_quit</code> signal-handling already used elsewhere in the codebase.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/bench.c</div>
+          <div>
+            <p>Added <code class="inline">multicore</code>: an independent-worker throughput ceiling measured against glorytun's actual mutex-guarded worker-pool pattern, at the same thread count the real tunnel would use, quantifying the pool's coordination overhead directly. Default single-thread <code class="inline">bench</code>/<code class="inline">bench fallback</code> output is unchanged.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/version.c<br>src/common.h<br>Makefile, meson.build</div>
+          <div>
+            <p>Version output split to one line per component. Glorytun's own version is now hardcoded (<code class="inline">"1.0"</code>) rather than derived from git/VERSION-file detection. Removed the now-dead <code class="inline">PACKAGE_VERSION</code> plumbing from the parts of the build that only fed the binary's own display.</p>
+            <p><code class="inline">version.sh</code>/<code class="inline">configure.ac</code> deliberately left intact — the tagged-release GitHub Actions workflow still depends on the <code class="inline">VERSION</code> file they produce.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/main.c</div>
+          <div>
+            <p>Bare <code class="inline">glorytun</code> listing gained an option/description header and a wider name column, and now surfaces <code class="inline">bench multicore</code>, <code class="inline">bench multicore fallback</code>, <code class="inline">bind qlen</code>, <code class="inline">path watch</code>, <code class="inline">path mtu</code>, and <code class="inline">path connections</code> as hint lines under their parent commands.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">mud/mud.h<br>mud/mud.c</div>
+          <div>
+            <p><strong>Fixed the "running but dead" bug, then removed the mechanism that caused it.</strong> <code class="inline">mud_send_path()</code> now only counts a send as successful when <code class="inline">sendmsg()</code> actually returned the full size, instead of unconditionally — kept. The auto-discovery binary search itself, plus <code class="inline">mud_update_mtu()</code>, <code class="inline">mud_mtu_reprobe()</code>, the min/max search range, and the periodic recheck, were an intermediate fix (re-probe on <code class="inline">EMSGSIZE</code> plus a 5-minute backstop) that was then <strong>deleted outright</strong> at request, since the search had never once reliably converged in practice — every path now uses a single fixed size, never probed, never renegotiated.</p>
+            <p><code class="inline">struct mud_path_conf.mtu</code> (one <code class="inline">uint64_t</code>, 0 = default) replaces the old min/max pair. <code class="inline">mud_mtu_apply()</code> is the single place that resolves it — to <code class="inline">MUD_MTU_DEFAULT</code> (1400) if unset, clamped to <code class="inline">MUD_MTU_HARD_MAX</code> otherwise — called from both <code class="inline">mud_set_path()</code> and <code class="inline">mud_rebind_path()</code>. <code class="inline">MUD_PROBING</code> remains only as the bootstrap status a path briefly holds at creation, superseded on the next update tick — no MTU meaning left.</p>
+            <p><strong><code class="inline">MUD_MTU_HARD_MAX</code> raised from 1500 to 65535</strong> (UDP's own header length-field maximum — practically 65507 over IPv4 once the IPv4 header is accounted for, a known, documented dead zone rather than an oversight). Raised safely: every buffer it sizes was resized to match, not just the check loosened. That includes the heap-allocated <code class="inline">mud_send_job</code>/<code class="inline">mud_recv_job.packet[]</code> arrays here in <code class="inline">mud.c</code> (×256 slots each) — see the next entry for the other half of this, in <code class="inline">bind.c</code>, which had its own disconnected hardcoded buffer size and would have silently reintroduced the same overflow risk if left alone. Net cost: roughly 66MB of additional heap+BSS committed once at startup, regardless of what MTU is actually configured.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/bind.c</div>
+          <div>
+            <p><code class="inline">tx_buf</code>/<code class="inline">rx_buf</code> — the TUN-device read/write buffers, filled directly by <code class="inline">tun_read()</code> and handed to <code class="inline">mud_recv_batch()</code> — had their own literal <code class="inline">1500</code>, entirely independent of the library's own MTU constant. Found while raising <code class="inline">MUD_MTU_HARD_MAX</code>; now both derive from <code class="inline">MUD_MTU_HARD_MAX</code> directly, so a configured MTU above 1500 doesn't get silently truncated at the TUN boundary even though the library itself would have handled it correctly.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/iface.h<br>src/iface.c<br>src/bind.c</div>
+          <div>
+            <p>New <code class="inline">qlen</code> flag on <code class="inline">glorytun bind</code> sets the TUN device's tx queue length (<code class="inline">SIOCSIFTXQLEN</code>, mirroring the existing <code class="inline">iface_set_mtu()</code>/<code class="inline">SIOCSIFMTU</code> pattern exactly) — Linux defaults TUN/TAP interfaces to 500, vs. 1000 for a typical Ethernet interface, and there was previously no way to raise it without a separate manual <code class="inline">ip link set ... txqueuelen</code> command after every restart. Applied once, right after the interface is created — unlike MTU, this isn't a value that ever needs to change afterward (no path config, no peer advertisement feeds into it), so it doesn't need the same per-iteration sync <code class="inline">gt_setup_mtu()</code> uses.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/path_manager.c</div>
+          <div>
+            <p><code class="inline">gt_path_manager_update_conf()</code> threads the single <code class="inline">mtu</code> field through instead of the old <code class="inline">mtu_min</code>/<code class="inline">mtu_max</code> pair, so <code class="inline">via</code>-interface-managed paths (not just fixed-address ones) can be given a fixed MTU too.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/path.c</div>
+          <div>
+            <p>Replaced the <code class="inline">mtumin</code>/<code class="inline">mtumax</code> flags with a single <code class="inline">mtu</code> flag on <code class="inline">path up</code>/<code class="inline">path down</code>, CLI-validated against <code class="inline">MUD_MTU_HARD_MAX</code> before the request is even sent. Removed the now-pointless specialized <code class="inline">path mtu</code> view (<code class="inline">gt_path_show_mtu</code> and its enum value are gone) since there's no longer a separate negotiation state worth a dedicated view — the default table's single <code class="inline">MTU</code> column (dropped in between TX/RX-LOSS-LIVE and PUBLIC) is enough. The old <code class="inline">MTU-PROBE</code>, <code class="inline">CFG-MIN</code>, <code class="inline">CFG-MAX</code> columns, and their <code class="inline">idle</code>/<code class="inline">unset</code> placeholder values, are gone along with the mechanism they described.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="changelog-subflows" class="wide">
+      <h2><span class="num">§</span>What changed — a later session, UDP sub-flow bonding</h2>
+      <div class="dek">A separate round of work from the changelog above — <code class="inline">connections N</code> and everything it touched, by file.</div>
+      <div class="changelog">
+        <div class="item">
+          <div class="file">mud/mud.h<br>mud/mud.c</div>
+          <div>
+            <p><strong><code class="inline">struct mud</code>'s single socket becomes a pool.</strong> <code class="inline">int fd</code> is gone, replaced by <code class="inline">int *sock</code> / <code class="inline">unsigned int sock_count</code> — heap-allocated, grown on demand by the new <code class="inline">mud_set_sock_count()</code> via <code class="inline">realloc()</code>, the same pattern <code class="inline">mud-&gt;paths</code> already used. <code class="inline">mud_create()</code>'s own socket setup now goes through a local <code class="inline">fd0</code> before committing it into the pool and incrementing <code class="inline">sock_count</code>, so a partial setup failure can't leak a socket <code class="inline">mud_delete()</code> doesn't know to close.</p>
+            <p><code class="inline">struct mud_path_conf</code> gained <code class="inline">unsigned char sock</code> — which pool socket a path uses. Folded into <code class="inline">mud_get_path()</code>'s match key in both its lookup loops, alongside <code class="inline">local_ifindex</code>/<code class="inline">remote</code>, and always stamped on creation (unlike <code class="inline">local_ifindex</code>, never zeroed for passive paths — <code class="inline">sock</code> is meaningful either way). Also folded into <code class="inline">mud_rebind_path()</code>'s match loop — without that, rebinding one sub-flow after a netlink event could silently match and corrupt a <em>different</em> sub-flow's path state.</p>
+            <p><code class="inline">mud_send_path()</code>/<code class="inline">mud_recv()</code>/<code class="inline">mud_recv_batch()</code> route through <code class="inline">mud-&gt;sock[...]</code> instead of the old single <code class="inline">mud-&gt;fd</code>; <code class="inline">mud_recv()</code>/<code class="inline">mud_recv_batch()</code> gained a leading socket-index parameter, <code class="inline">mud_get_fd()</code> gained one too. <code class="inline">mud_set_path()</code> rejects a <code class="inline">conf-&gt;sock</code> the pool hasn't grown to cover yet, rather than indexing an unopened socket.</p>
+            <p><strong><code class="inline">MUD_SOCK_MAX</code> is 256, not a chosen default</strong> — it's the range of the <code class="inline">unsigned char sock</code> field, the actual reason a ceiling exists at all. It started this session's work at <code class="inline">8</code>, a number picked purely because it sounded reasonable; corrected once it became clear that requesting more sub-flows should be the user's call, not a compile-time opinion, and the socket pool was made to grow like <code class="inline">mud-&gt;paths</code> instead of being a fixed-size array to make that possible.</p>
+            <p><code class="inline">MUD_PATH_MAX</code> raised 32 → 64: <code class="inline">connections N</code> multiplies path-table consumption per physical link, and the passive side mirrors the same count independently via auto-discovery.</p>
+            <p><strong>Not touched:</strong> <code class="inline">mud_select_path()</code>, the AIMD rate controller, loss tracking, RTT, beat scheduling, the crypto worker pool, key exchange. None of it has any concept of sockets — all of it operates on <code class="inline">struct mud_path</code> or plaintext/ciphertext buffers.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">mud/test.c</div>
+          <div>
+            <p>Updated its <code class="inline">mud_get_fd()</code>/<code class="inline">mud_recv()</code> call sites for the new signatures — always socket index <code class="inline">0</code>, since the test harness only ever used one.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/ctl.h</div>
+          <div>
+            <p><code class="inline">struct ctl_msg</code> gained <code class="inline">unsigned int connections</code> — a top-level sibling field next to <code class="inline">ifname</code>/<code class="inline">ifindex</code>, not a member of <code class="inline">struct mud_path_conf</code>'s own union, since it's a one-shot request fan-out count rather than a per-path tunable. <code class="inline">0</code> means unspecified/unchanged.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/bind.c</div>
+          <div>
+            <p>The <code class="inline">CTL_PATH_CONF</code> handler now fans one <code class="inline">connections N</code> request out into N <code class="inline">gt_path_manager_set()</code> calls (one per <code class="inline">sock</code> index), after growing the socket pool via <code class="inline">mud_set_sock_count()</code> and marking every newly opened socket non-blocking. Rejects a count above <code class="inline">MUD_SOCK_MAX</code>, and rejects <code class="inline">&gt; 1</code> requested without <code class="inline">via</code>. A second pass scans the path manager for sub-flows left over from a previous, larger count and brings them down — the same way a single <code class="inline">path down</code> already does.</p>
+            <p><code class="inline">mud_can_read</code>/<code class="inline">mud_can_write</code> became per-socket arrays; <code class="inline">mud_get_sock_count()</code> is read fresh every event-loop iteration so newly opened sockets are picked up automatically, and <code class="inline">select()</code>'s fd sets and <code class="inline">last_fd</code> are rebuilt across every live socket each iteration rather than computed once before the loop. Kept <code class="inline">select()</code> rather than switching to <code class="inline">poll()</code>/<code class="inline">epoll()</code> — see the caveat in <a href="#subflows">UDP sub-flow bonding</a>.</p>
+            <p>New <code class="inline">gt_sockaddr_equal()</code> helper (family + address + port) supports the shrink-scan above without exporting <code class="inline">path_manager.c</code>'s own internal comparison helpers.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/path_manager.h<br>src/path_manager.c</div>
+          <div>
+            <p><code class="inline">struct gt_managed_path</code> gained <code class="inline">sock</code> — a logical path with N sub-flows now occupies N managed entries, one per <code class="inline">sock</code> index. <code class="inline">gt_path_manager_find()</code>/<code class="inline">gt_path_manager_set()</code> both key on it now.</p>
+            <p><strong><code class="inline">gt_path_manager_apply()</code> sets <code class="inline">conf.sock = path-&gt;sock</code> before calling <code class="inline">mud_set_path()</code></strong> — a required fix, not optional: it previously built <code class="inline">conf</code> from <code class="inline">desired_conf</code> without ever setting <code class="inline">.sock</code>, which would have defaulted every sub-flow to socket <code class="inline">0</code> and silently collapsed them onto one path. <code class="inline">gt_path_manager_reconcile_one()</code>'s <code class="inline">mud_rebind_path()</code> call now passes <code class="inline">path-&gt;sock</code> for the same reason. <code class="inline">gt_path_manager_status()</code>'s runtime-path match loop requires <code class="inline">candidate-&gt;conf.sock == managed-&gt;sock</code> — without it, every sub-flow's status row would have shown sub-flow 0's live stats.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/path.c</div>
+          <div>
+            <p>New <code class="inline">connections &lt;n&gt;</code> argz option (<code class="inline">min 1, max MUD_SOCK_MAX</code>), gated into the existing <code class="inline">change</code> detection and client-side rejected when <code class="inline">&gt; 1</code> without <code class="inline">via</code>, before the request is even sent.</p>
+            <p><strong><code class="inline">gt_path_status()</code> was rewritten, not column-patched.</strong> Sub-flows now render grouped under their physical path — one header line, then indented tree-connector (<code class="inline">├─</code>/<code class="inline">└─</code>) lines underneath — instead of as flat rows that would otherwise show identical <code class="inline">IFACE</code>/<code class="inline">LOCAL</code>/<code class="inline">REMOTE</code> for every sub-flow of one path, distinguishable only by noticing which numbers happened to differ. Fields on each sub-flow line became self-labeled (<code class="inline">rtt 41.2</code>) rather than padded table columns, since there's no longer one uniform column set shared by every row. The old fixed-column-width machinery — <code class="inline">struct gt_path_hdr</code>, <code class="inline">gt_path_print()</code> — and the now-unused <code class="inline">&lt;stdarg.h&gt;</code> include were removed entirely rather than left dead.</p>
+            <p>One real behavior change from this, not just cosmetic: the old flat table always printed its column-header row even with zero configured paths; the grouped view prints nothing when there's nothing to group.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">mud/mud.h<br>mud/mud.c</div>
+          <div>
+            <p><strong>Two problems found from working through what the design implies in practice, both requested explicitly after real testing, not speculative hardening.</strong></p>
+            <p><strong>Sub-flows were being selected by measured rate, not evenly.</strong> <code class="inline">mud_select_path()</code> weights by <code class="inline">tx.rate</code> — correct for bonding two different-capacity physical links, wrong for sub-flows of one link, which have no real capacity difference from each other. Left alone: a rich-get-richer trap, since whichever sub-flow(s) pull ahead early get selected more (selection weight <em>is</em> measured rate), keeping their rate estimate growing while idle siblings never get real traffic to prove themselves against. New <code class="inline">struct mud_path.select_weight</code> (<code class="inline">mud.h</code>), recomputed every <code class="inline">mud_update()</code> tick: a new <code class="inline">mud_path_same_group()</code> helper (next to <code class="inline">mud_cmp_addr()</code>/<code class="inline">mud_cmp_port()</code>) identifies which <code class="inline">MUD_RUNNING</code> paths share one physical link — same <code class="inline">local_ifindex</code> (or local address for legacy/passive paths) and same remote <em>address</em>, deliberately excluding remote port, since sub-flows vary by local port on the active side but by remote port on the passive side, which never opens extra sockets. Every path's <code class="inline">select_weight</code> becomes its group's average <code class="inline">tx.rate</code>, so <code class="inline">mud_select_path()</code>'s walk (now reading <code class="inline">select_weight</code> instead of <code class="inline">tx.rate</code> directly) splits packets evenly within a group while still weighting proportionally between distinct physical links. <code class="inline">mud-&gt;rate</code> is recomputed from the sum of <code class="inline">select_weight</code> rather than reused from the original <code class="inline">tx.rate</code> sum, so integer-division rounding inside each group's average can't leave the two inconsistent — <code class="inline">mud_select_path()</code>'s cursor is scaled against <code class="inline">mud-&gt;rate</code>, and any drift there risks the walk running past the last path without finding a match. <code class="inline">tx.rate</code> itself is untouched, still each sub-flow's genuine measured throughput for display and its own AIMD growth/decay.</p>
+            <p><strong>Idle-looking sub-flows were going stale for up to 25 seconds.</strong> <code class="inline">mud_path_track()</code> backs a <code class="inline">MUD_RUNNING</code> path's beat cadence off from ~100ms to the global 25s <code class="inline">keepalive</code> once it's seen no traffic in the last second — sensible for a genuinely idle physical link, wrong for a sub-flow: with N of them splitting traffic, any individual one can look idle for a full second purely by chance while the link overall stays busy. Once backed off, its RTT/loss/rate only refresh when a beat reply is processed, and its <code class="inline">tx.rate</code> stops being reassessed too — compounding the selection problem above. Fixed with the simpler of two options weighed: <code class="inline">mud_path_track()</code> now skips the idle backoff entirely whenever <code class="inline">mud-&gt;sock_count &gt; 1</code>, rather than only for paths actually grouped into a <code class="inline">connections &gt; 1</code> set — coarser (also keeps a lone non-bonded path's beat at full cadence just because some other path on the same daemon uses sub-flows), but correspondingly simpler, and the overhead is trivial on any link worth bonding sub-flows over.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/path.c</div>
+          <div>
+            <p>New <code class="inline">tx</code>/<code class="inline">rx</code> fields on every sub-flow line (default and <code class="inline">stat</code> views, not <code class="inline">rtt</code>) show a real observed rate, answering a question neither existing field could: is this specific sub-flow actually carrying anything right now. <code class="inline">tx.rate</code>/<code class="inline">rx.rate</code> are glorytun's own AIMD-<em>allowed</em> budget, not a usage meter — an idle sub-flow can sit at a healthy <code class="inline">tx.rate</code> long after it stopped moving data.</p>
+            <p>Computed entirely client-side rather than adding daemon/protocol tracking: new <code class="inline">gt_path_track_rate()</code> keeps a static, per-(ifname, remote, sock) sample table and diffs each refresh's cumulative <code class="inline">tx.bytes</code>/<code class="inline">rx.bytes</code> against the previous refresh's, over the actual wall-clock time elapsed (<code class="inline">clock_gettime(CLOCK_MONOTONIC)</code> via a new <code class="inline">gt_path_now_ns()</code>, mirroring the existing pattern in <code class="inline">src/bench.c</code>). Formatted through the already-existing <code class="inline">gt_torate()</code> helper for consistency with how configured rate limits are already shown elsewhere in this file. Needs two samples a second apart, so it only produces a number under <code class="inline">watch</code> — a one-shot <code class="inline">glorytun path</code> query has nothing prior to diff against and shows <code class="inline">-</code>.</p>
+          </div>
+        </div>
+      </div>
+      <p class="note" style="font-family:var(--sans);color:var(--text-dim);font-size:0.88rem">Also updated to match: <code class="inline">docs/cli-reference.md</code>, <code class="inline">docs/architecture.md</code>, and a new <code class="inline">docs/udp-subflows-plan.md</code> implementation record.</p>
+    </section>
+
+    <section id="changelog-reorder" class="wide">
+      <h2><span class="num">§</span>What changed — a later session, packet resequencing</h2>
+      <div class="dek">Requested as "Option A" after a user reported a single TCP flow measuring far below what several parallel flows achieved over the same bonded tunnel — see <a href="#reorder">Packet resequencing</a> for the mechanism. Built and empirically tested this time, not just written; see that section for the methodology and the bug it caught.</div>
+      <div class="changelog">
+        <div class="item">
+          <div class="file">mud/mud.h</div>
+          <div>
+            <p>New <code class="inline">mud_conf.reorder_window</code> — <code class="inline">0</code> (default) disables it, matching every other duration field on <code class="inline">struct mud_conf</code>.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">mud/mud.c</div>
+          <div>
+            <p>New fixed-size, always-allocated <code class="inline">struct mud_reorder</code> (<code class="inline">MUD_REORDER_MAX</code> slots × <code class="inline">MUD_REORDER_SLOT_SIZE</code> 2048 bytes) embedded in <code class="inline">struct mud</code> — same no-<code class="inline">realloc()</code> rationale <code class="inline">mud-&gt;paths</code>/<code class="inline">mud-&gt;sock</code> already follow post-rewrite: a pointer a worker thread holds can't be invalidated by another thread resizing it. Costs nothing when <code class="inline">reorder_window</code> is <code class="inline">0</code> beyond the one-time allocation. Started at 512 slots (~10ms of headroom at 600Mbit); raised to 4096 (~8.5MB) once real testing against a ~200ms-RTT path showed it silently undersized — see below.</p>
+            <p>New <code class="inline">mud_reorder_insert()</code> and <code class="inline">mud_reorder_flush()</code>, called from <code class="inline">mud_worker_loop()</code>'s RX delivery step and its poll-timeout branch. A packet <code class="inline">mud_reorder_insert()</code> can't buffer (full, oversized, or its own path's hold caps to zero) still gets delivered immediately by the caller instead of dropped — the buffer is strictly additive, never a new failure mode.</p>
+            <p>Two new mutexes on <code class="inline">struct mud</code> (<code class="inline">reorder.lock</code>, <code class="inline">reorder.flush_lock</code>), initialized/destroyed alongside the existing <code class="inline">state_lock</code>/<code class="inline">keyx_lock</code> in <code class="inline">mud_create()</code>/<code class="inline">mud_delete()</code>. <code class="inline">mud_set()</code> threads <code class="inline">reorder_window</code> through the same <code class="inline">if (conf-&gt;x) c.x = conf-&gt;x</code> pattern every other field already uses.</p>
+            <p><strong>Went through three iterations, not one</strong> — (1) the first <code class="inline">mud_reorder_flush()</code> capped its readiness scan at <code class="inline">MUD_REORDER_FLUSH_BATCH</code> (32) entries per pass, sorting correctly within a batch but not across batches once more than one batch's worth was ready at once, caught live when retransmits went up instead of down; fixed by scanning and sorting the complete ready set first, chunking only the delivery copy afterward. (2) The buffer itself was undersized for a real long-haul path (512 slots covers ~10ms at 600Mbit; a ~200ms-RTT path needs a 40-60ms window, i.e. thousands of slots) — raised <code class="inline">MUD_REORDER_MAX</code> to 4096. (3) Even with more capacity, one flat <code class="inline">reorder_window</code> applied identically to every packet turned out to measurably hurt single-flow throughput at that same real RTT (see <a href="#reorder">Packet resequencing</a>'s "flat window doesn't survive contact with a real long-haul path"). Redesigned around a new <code class="inline">mud_path.reorder_hold</code> (mud.h) -- recomputed every <code class="inline">mud_update()</code> tick, same cadence as <code class="inline">select_weight</code>, from each RUNNING path's real <code class="inline">rtt.val</code> relative to the slowest RUNNING path -- so <code class="inline">mud_reorder_insert()</code> now takes a per-packet <code class="inline">hold</code> (capped by <code class="inline">reorder_window</code>) instead of comparing against a global watermark, and each slot stores a precomputed <code class="inline">deadline</code> instead of <code class="inline">sent_time</code>/<code class="inline">local_time</code> -- <code class="inline">mud_reorder_flush()</code> simplified to just releasing whatever's past its deadline, sorted by deadline. <code class="inline">mud_recv_finish()</code> gained a <code class="inline">reorder_hold_out</code> parameter so it can hand back the already-resolved path's hold value at zero extra cost (it already holds <code class="inline">state_lock</code> with <code class="inline">path</code> in hand at that point); <code class="inline">mud_recv()</code> passes <code class="inline">NULL</code>, unaffected. The wire-format <code class="inline">sent_time</code> field is no longer read for this at all -- the redesign runs entirely on RTT this side already measures locally.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">mud/mud.h</div>
+          <div>
+            <p>New <code class="inline">mud_path.reorder_hold</code>, alongside <code class="inline">select_weight</code> -- both recomputed on the same <code class="inline">mud_update()</code> pass now.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/set.c</div>
+          <div>
+            <p>New <code class="inline">reorderwindow</code> flag on <code class="inline">glorytun set</code>, parsed with <code class="inline">argz_time_suffix</code> and threaded through <code class="inline">CTL_CONF</code> exactly like <code class="inline">kxtimeout</code>/<code class="inline">timetolerance</code>/<code class="inline">keepalive</code> — same ×1000 ms→µs conversion, same "0 means unchanged" limitation, same echo of the resulting config on success. Its meaning shifted under it during the redesign above (delay → ceiling) with no CLI change needed.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/bind.c</div>
+          <div>
+            <p><strong>Not touched.</strong> The <code class="inline">CTL_CONF</code> handler already forwards the whole <code class="inline">struct mud_conf</code> to <code class="inline">mud_set()</code> generically — adding a field to the struct was enough for the control plane to pick it up with no dedicated plumbing.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">docs/architecture.md<br>docs/cli-reference.md<br>README.md</div>
+          <div>
+            <p>New "Packet resequencing" sections describing the mechanism and the sender/receiver distinction. Along the way, <code class="inline">docs/cli-reference.md</code> turned out to have the same stale <code class="inline">mtumin</code>/<code class="inline">mtumax</code> binary-search description <code class="inline">docs/architecture.md</code> had already been caught having — fixed to match the single fixed <code class="inline">mtu</code> field this page's own <a href="#mtu">Fixed MTU</a> section (and <code class="inline">cmd-path</code>, above) already documented correctly.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="wide" style="margin-top:-2rem">
+      <p class="note" style="font-family:var(--sans);color:var(--text-dim);font-size:0.85rem"><strong>Tried and reverted, on request:</strong> a <code class="inline">SO_RCVBUF</code>/<code class="inline">SO_SNDBUF</code> increase in <code class="inline">mud_setup_socket()</code>, after <code class="inline">nstat -az UdpRcvbufErrors UdpInErrors</code> confirmed live, climbing kernel-level UDP receive-buffer drops on the server -- a real, separate cause of elevated RX-LOSS with no code bug involved, distinct from the MTU issue above. Reverted to isolate the MTU fix on its own; worth revisiting if buffer drops reappear independently.</p>
+    </section>
+
+    <footer class="page-end">
+      Everything above the <a href="#reorder">packet resequencing</a> section (MTU rewrite, sub-flow bonding) was written without ever compiling or running it — no Linux toolchain was available in that environment. Resequencing was different: built and tested end to end, but only in a WSL2-simulated network (see that section) — real hardware, real ISPs, no substitute. Build and smoke-test everything on target hardware before trusting any of it in production.
+    </footer>
+  </main>
+</div>
