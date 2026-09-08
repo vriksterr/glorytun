@@ -117,6 +117,7 @@ glorytun set [dev NAME]
   [timetolerance DURATION]
   [keepalive DURATION]
   [reorderwindow DURATION]
+  [flow|packet]
 ```
 
 Durations accept the suffixes understood by the bundled argument parser, such
@@ -130,6 +131,12 @@ a successful update.
   Off (`0`) by default; like the other durations here, it can only be raised
   to a new nonzero value through this command, not explicitly reset back to
   `0` once enabled.
+* `flow` and `packet` select the tunnel-wide path-scheduling mode, live,
+  without restarting the tunnel -- see "Packet resequencing" below for the
+  trade-off between them. `flow` (the default) pins each flow to one path;
+  `packet` spreads every packet across paths regardless of flow. Unlike the
+  duration settings above, this one *can* be explicitly set back to its
+  default (`flow`) through this command.
 
 Example:
 
@@ -142,16 +149,19 @@ time synchronization is preferable.
 
 ### Packet resequencing
 
-Multipath striping schedules per packet, not per flow (see `connections`
-below), so a single ordered-delivery flow -- almost always TCP -- crossing
-several physical paths at once will routinely see its packets arrive out of
-order, since paths differ in latency. TCP reads that as loss and throttles
-itself even though nothing was actually dropped, which is why a lone flow
-measures well below a multipath tunnel's combined throughput while several
-concurrent flows, run in parallel, add up to close to it.
+`flow` scheduling (the default -- see `flow`/`packet` above) pins each flow
+to one path, so this mostly doesn't apply out of the box. Under `packet`
+scheduling, multipath striping schedules per packet rather than per flow
+(see `connections` below), so a single ordered-delivery flow -- almost
+always TCP -- crossing several physical paths at once will routinely see
+its packets arrive out of order, since paths differ in latency. TCP reads
+that as loss and throttles itself even though nothing was actually
+dropped, which is why a lone flow under `packet` scheduling measures well
+below a multipath tunnel's combined throughput while several concurrent
+flows, run in parallel, add up to close to it.
 
 ```sh
-glorytun set dev gt0 reorderwindow 20ms
+glorytun set dev gt0 packet reorderwindow 20ms
 ```
 
 Once set, decrypted packets are briefly buffered tunnel-wide (across every
@@ -161,6 +171,10 @@ order, so a single flow no longer sees the reordering. This adds up to
 not just the flow benefiting from it -- so treat it as a throughput/latency
 trade-off to size deliberately, not a setting to maximize. It defaults to
 off; existing deployments see no behavior change unless this is configured.
+It's meaningful under either scheduling mode (cross-path latency skew can
+still reorder occasional packets even in `flow` mode, around a path
+weight change), but it earns its cost primarily under `packet` mode, where
+reordering is the norm rather than the rare exception.
 
 ## `path`
 
@@ -273,6 +287,20 @@ Important units and behavior:
   are sized to it. A newly configured value takes effect immediately.
 * `fixed` uses the configured limits. `auto` enables experimental dynamic rate
   detection.
+* Bring a path up with an explicit `rate` from the start, especially in the
+  default `fixed` mode. A path's share of outgoing traffic
+  (`select_weight`) is derived from `tx.rate`, and in `fixed` mode `tx.rate`
+  is *only* ever set by an explicit `rate` (or adopted from the peer's
+  advertised value) -- there's no fallback that derives it from observed
+  traffic the way `auto` mode does. A path brought up with no `rate` at all
+  therefore starts, and permanently stays, at `tx.rate 0`: zero weight means
+  `mud_select_path()`/`mud_select_path_rr()` can never choose it, so it can
+  never carry the very traffic that might otherwise inform its rate.
+  Verified directly: such a path passed control/keepalive traffic normally
+  (that doesn't go through path selection) but never carried a single real
+  data packet, indefinitely -- indistinguishable from a healthy path in
+  `path` status output, and easy to mistake for a routing or firewall
+  problem instead. Setting `rate` sidesteps this entirely.
 * `connections` splits this path into that many independent parallel UDP
   sub-flows (distinct local ports), load-balanced by the same weighted
   scheduler that already bonds separate physical paths -- useful for
