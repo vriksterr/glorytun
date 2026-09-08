@@ -18,6 +18,13 @@ gt_set(int argc, char **argv, void *data)
         {"keepalive",     "Keep alive timeout",     argz_ull,  &ka},
         {"reorderwindow", "Packet resequencing window (default off)",
                                                      argz_ull,  &rw},
+        {"flow",   "Path scheduling: one flow rides one path (default) "
+                   "-- avoids a single ordered-delivery stream mistaking "
+                   "cross-path reordering for loss",         .grp = 1},
+        {"packet", "Path scheduling: spread every packet across paths "
+                   "regardless of flow -- lets one flow exceed a single "
+                   "path's own capacity, at the cost of reordering; "
+                   "pair with reorderwindow",                .grp = 1},
         {0}};
 
     int err = argz(argc, argv, z);
@@ -35,6 +42,11 @@ gt_set(int argc, char **argv, void *data)
         },
     }, res = {0};
 
+    if (argz_is_set(z, "flow"))
+        req.conf.path_schedule = (MUD_SCHEDULE_FLOW << 1) | 1;
+    else if (argz_is_set(z, "packet"))
+        req.conf.path_schedule = (MUD_SCHEDULE_PACKET << 1) | 1;
+
     int fd = ctl_connect(dev);
 
     if (fd < 0) {
@@ -51,8 +63,10 @@ gt_set(int argc, char **argv, void *data)
         gt_totime(t3, sizeof(t3), res.conf.reorder_window / 1000);
 
         printf("set dev %s kxtimeout %s timetolerance %s keepalive %s "
-               "reorderwindow %s\n",
-                res.tun_name, t0, t1, t2, t3);
+               "reorderwindow %s schedule %s\n",
+                res.tun_name, t0, t1, t2, t3,
+                res.conf.path_schedule == MUD_SCHEDULE_PACKET
+                    ? "packet" : "flow");
     }
     if (ret == -1 && errno)
         perror("set");

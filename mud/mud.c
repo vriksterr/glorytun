@@ -88,6 +88,36 @@
 #define MUD_CTRL_SIZE (CMSG_SPACE(MUD_PKTINFO_SIZE) + \
                        CMSG_SPACE(sizeof(struct in6_pktinfo)))
 
+/* Requested SO_RCVBUF/SO_SNDBUF for every socket mud opens (see
+ * mud_setup_socket()). The OS default is often tiny -- as little as
+ * ~208KB (net.core.rmem_default) on stock Linux -- which leaves almost no
+ * burst-absorption margin at real tunnel throughput: confirmed live at
+ * ~2Gbit offered over a single socket, where /proc/net/snmp's Udp
+ * RcvbufErrors accounted for effectively all of the loss while the NIC
+ * itself reported zero drops (ethtool -S) -- packets were arriving fine
+ * and being discarded purely because this socket's own queue filled up
+ * between reads. 4MiB cut that loss clearly and repeatably (~31% fewer
+ * RcvbufErrors in a controlled A/B). 8MiB was tested against that 4MiB
+ * baseline directly (5 runs each, same session, same hardware) and showed
+ * a real but noisier further reduction (~24% -> ~16% average loss in that
+ * run, individual samples still ranging widely) -- a smaller, less crisp
+ * win than 4MiB's own jump from the stock default, as expected for
+ * further-doubling an already-reasonable buffer, but kept as the default
+ * on balance rather than the point of fully diminished returns.
+ *
+ * This is a request, not a guarantee: the kernel silently clamps it to
+ * whatever net.core.rmem_max/wmem_max already allows rather than
+ * erroring, so it's always safe to ask for. The operational catch: stock
+ * Linux ships rmem_max/wmem_max at 4MiB, *below* this value -- on such a
+ * host the request silently clamps back to 4MiB and this setting has no
+ * effect at all until the operator also raises those two sysctls to at
+ * least 8MiB. There is no way for this process to do that for itself
+ * (it's a systemwide, not per-socket, ceiling); deployments that want the
+ * full benefit need to set net.core.rmem_max/wmem_max >= (1 << 23)
+ * themselves (e.g. via sysctl.d, or a startup script -- see this
+ * project's own deployment notes). */
+#define MUD_SOCK_BUF_SIZE (1 << 23)
+
 #define MUD_STORE_MSG(D,S) mud_store((D),(S),sizeof(D))
 #define MUD_LOAD_MSG(S)    mud_load((S),sizeof(S))
 
@@ -415,6 +445,69 @@ mud_unmapv4(union mud_sockaddr *addr)
     addr->sin = sin;
 }
 
+/* Derives a path-selection cursor from the inner (plaintext) packet's
+ * 5-tuple -- protocol plus source/destination address and port -- instead
+ * of from per-packet randomness (the previous approach read the last two
+ * bytes of the *encrypted* packet, which differ every time even for
+ * identical plaintext, by design of AEAD). mud_select_path() treats this
+ * as a uniform pick over [0, mud->rate): every packet belonging to the
+ * same TCP/UDP flow now lands on the same path as long as path weights
+ * haven't changed, instead of being scattered independently across every
+ * sub-flow. That scattering is the direct cause of a single ordered-
+ * delivery flow seeing out-of-order arrivals and mistaking them for loss
+ * (see "Packet resequencing" in docs/architecture.md) -- confirmed live:
+ * a single TCP stream over `connections 4` on one physical link measured
+ * ~25% *lower* throughput than `connections 1`, purely from this
+ * reordering, with nothing else different about the path. Hashing by flow
+ * removes that at the source for the common case (one flow, one path)
+ * while still spreading many concurrent flows across every path in
+ * aggregate, the same way ECMP/LACP hash-based link selection does --
+ * different flows hash to different points in the same weighted range.
+ *
+ * Falls back to hashing whatever bytes are available for anything that
+ * isn't recognizably IPv4/IPv6 TCP/UDP (still deterministic per source,
+ * just coarser -- e.g. address-only for IPv6 with extension headers this
+ * deliberately doesn't walk past). Never fails outright: a coarser but
+ * stable split is always better for one flow than a path that changes
+ * every packet. Fixed-size stack buffer, no allocation, bounded work
+ * regardless of packet size. */
+static uint16_t
+mud_flow_hash(const unsigned char *data, size_t size)
+{
+    unsigned char key[37] = {0};
+    size_t key_size;
+
+    if (size >= 20 && (data[0] >> 4) == 4) {
+        const unsigned ihl = (unsigned)(data[0] & 0xF) * 4;
+        memcpy(key, &data[12], 8);          /* src addr, dst addr */
+        key[8] = data[9];                   /* protocol */
+        key_size = 9;
+        if ((key[8] == 6 || key[8] == 17) && ihl >= 20 && size >= ihl + 4) {
+            memcpy(&key[9], &data[ihl], 4); /* src port, dst port */
+            key_size = 13;
+        }
+    } else if (size >= 40 && (data[0] >> 4) == 6) {
+        memcpy(key, &data[8], 32);          /* src addr, dst addr */
+        key[32] = data[6];                  /* next header */
+        key_size = 33;
+        if ((key[32] == 6 || key[32] == 17) && size >= 44) {
+            memcpy(&key[33], &data[40], 4); /* src port, dst port */
+            key_size = 37;
+        }
+    } else {
+        key_size = size < sizeof(key) ? size : sizeof(key);
+        memcpy(key, data, key_size);
+    }
+    /* FNV-1a -- fast, simple, good-enough avalanche for a scheduling
+     * hash; this is load distribution, not a security boundary. */
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < key_size; i++) {
+        h ^= key[i];
+        h *= 16777619u;
+    }
+    return (uint16_t)(h ^ (h >> 16));
+}
+
 /* Caller must already hold state_lock. */
 static struct mud_path *
 mud_select_path(struct mud *mud, uint16_t cursor)
@@ -433,6 +526,37 @@ mud_select_path(struct mud *mud, uint16_t cursor)
         k -= path->select_weight;
     }
     return NULL;
+}
+
+/* Smooth weighted round-robin -- the same algorithm nginx uses for
+ * upstream load balancing. Caller must already hold state_lock, same as
+ * mud_select_path() above, which this is the MUD_SCHEDULE_PACKET
+ * alternative to (see enum mud_schedule's own comment for the choice
+ * between the two). Verified: 4 equal-weight paths cycle in strict
+ * 0,1,2,3,0,1,2,3... order, never streaking, unlike a random cursor which
+ * only converges to the right proportions over many selections. */
+static struct mud_path *
+mud_select_path_rr(struct mud *mud)
+{
+    struct mud_path *best = NULL;
+    int64_t total = 0;
+
+    for (unsigned i = 0; i < mud->capacity; i++) {
+        struct mud_path *path = &mud->paths[i];
+
+        if (path->status != MUD_RUNNING || !path->select_weight)
+            continue;
+
+        path->select_credit += (int64_t)path->select_weight;
+        total += (int64_t)path->select_weight;
+
+        if (!best || path->select_credit > best->select_credit)
+            best = path;
+    }
+    if (best)
+        best->select_credit -= total;
+
+    return best;
 }
 
 /* No discovery: the wire size a path sends at is whatever was configured
@@ -747,6 +871,7 @@ mud_set(struct mud *mud, struct mud_conf *conf)
     if (conf->timetolerance)  c.timetolerance  = conf->timetolerance;
     if (conf->kxtimeout)      c.kxtimeout      = conf->kxtimeout;
     if (conf->reorder_window) c.reorder_window = conf->reorder_window;
+    if (conf->path_schedule)  c.path_schedule  = conf->path_schedule >> 1;
 
     mud->conf = c;
     pthread_mutex_unlock(&mud->state_lock);
@@ -771,6 +896,13 @@ mud_get_mtu(struct mud *mud)
 static int
 mud_setup_socket(int fd, int v4, int v6)
 {
+    /* Best-effort -- see MUD_SOCK_BUF_SIZE's own comment. Not part of the
+     * required chain below: a platform/sandbox that rejects this still
+     * gets a working socket, just with whatever smaller default the OS
+     * provides, exactly as before this existed. */
+    mud_sso_int(fd, SOL_SOCKET, SO_RCVBUF, MUD_SOCK_BUF_SIZE);
+    mud_sso_int(fd, SOL_SOCKET, SO_SNDBUF, MUD_SOCK_BUF_SIZE);
+
     if ((mud_sso_int(fd, SOL_SOCKET, SO_REUSEADDR, 1)) ||
         (v4 && mud_sso_int(fd, IPPROTO_IP, MUD_PKTINFO, 1)) ||
         (v6 && mud_sso_int(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, 1)) ||
@@ -1561,7 +1693,7 @@ static int
 mud_recv_finish(struct mud *mud, unsigned int sock, struct msghdr *msg,
                 union mud_sockaddr *remote, unsigned char *packet,
                 ssize_t packet_size, unsigned char *data, size_t data_cap,
-                uint64_t *reorder_hold_out)
+                uint64_t timetolerance, uint64_t *reorder_hold_out)
 {
     if (reorder_hold_out)
         *reorder_hold_out = 0;
@@ -1575,18 +1707,28 @@ mud_recv_finish(struct mud *mud, unsigned int sock, struct msghdr *msg,
 
     mud_unmapv4(remote);
 
-    pthread_mutex_lock(&mud->state_lock);
-    const uint64_t timetolerance = mud->conf.timetolerance;
-
+    /* timetolerance is now a caller-supplied snapshot (see mud_recv() and
+     * mud_worker_loop(), which read it once under state_lock -- once per
+     * call and once per worker-loop iteration respectively -- rather than
+     * this function taking the lock itself on every single packet). This
+     * removes one of the two state_lock acquisitions from the RX hot path:
+     * unlike the second section below (which can fall into mud_recv_msg()
+     * -> mud_send_msg() -> sendmsg(), a real syscall, so batching it across
+     * a whole recvmmsg() batch the way the TX path batches path selection
+     * would mean holding state_lock across multiple syscalls), this check
+     * never touches anything that leads to a syscall, so a value up to one
+     * worker-loop iteration (~100ms) stale is harmless -- same staleness
+     * tolerance already accepted for mud->conf.reorder_window in
+     * mud_reorder_insert() below. */
     if ((MUD_TIME_MASK(now - sent_time) > timetolerance) &&
         (MUD_TIME_MASK(sent_time - now) > timetolerance)) {
+        pthread_mutex_lock(&mud->state_lock);
         mud->err.clocksync.addr = *remote;
         mud->err.clocksync.time = now;
         mud->err.clocksync.count++;
         pthread_mutex_unlock(&mud->state_lock);
         return 0;
     }
-    pthread_mutex_unlock(&mud->state_lock);
 
     const size_t ret = MUD_MSG(sent_time)
                      ? mud_decrypt_msg(mud, data, data_cap, packet, (size_t)packet_size)
@@ -1639,6 +1781,7 @@ mud_recv(struct mud *mud, unsigned int sock, void *data, size_t size)
 {
     pthread_mutex_lock(&mud->state_lock);
     const int fd = (sock < mud->sock_count) ? mud->sock[sock] : -1;
+    const uint64_t timetolerance = mud->conf.timetolerance;
     pthread_mutex_unlock(&mud->state_lock);
 
     if (fd < 0) {
@@ -1665,7 +1808,7 @@ mud_recv(struct mud *mud, unsigned int sock, void *data, size_t size)
         return -1;
 
     return mud_recv_finish(mud, sock, &msg, &remote, packet, packet_size,
-                           data, size, NULL);
+                           data, size, timetolerance, NULL);
 }
 
 static int
@@ -1845,6 +1988,7 @@ mud_update(struct mud *mud)
 
         if (path->status != MUD_RUNNING) {
             path->select_weight = 0;
+            path->select_credit = 0;
             continue;
         }
         uint64_t group_total = 0;
@@ -2017,6 +2161,7 @@ mud_send(struct mud *mud, const void *data, size_t size)
     }
     unsigned char packet[MUD_PKT_MAX_SIZE];
     const uint64_t now = mud_now(mud);
+    const uint16_t k = mud_flow_hash(data, size);
     const size_t packet_size = mud_encrypt(mud, now,
                                            packet, sizeof(packet),
                                            data, size);
@@ -2024,12 +2169,12 @@ mud_send(struct mud *mud, const void *data, size_t size)
         errno = EMSGSIZE;
         return -1;
     }
-    uint16_t k;
-    memcpy(&k, &packet[packet_size - sizeof(k)], sizeof(k));
 
     pthread_mutex_lock(&mud->state_lock);
 
-    struct mud_path *path = mud_select_path(mud, k);
+    struct mud_path *path = mud->conf.path_schedule == MUD_SCHEDULE_PACKET
+                           ? mud_select_path_rr(mud)
+                           : mud_select_path(mud, k);
 
     if (!path) {
         pthread_mutex_unlock(&mud->state_lock);
@@ -2517,6 +2662,7 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
     while (!*quit) {
         pthread_mutex_lock(&mud->state_lock);
         const unsigned int sock_count = mud->sock_count;
+        const uint64_t timetolerance = mud->conf.timetolerance;
         pthread_mutex_unlock(&mud->state_lock);
 
         /* mud->sock[i] for i < sock_count (just snapshotted above) never
@@ -2598,6 +2744,7 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
                     break;
 
                 struct mud_tx_slot *s = &scratch->tx[tx_n];
+                const uint16_t k = mud_flow_hash(plain, (size_t)r);
                 const size_t packet_size = mud_encrypt(mud, mud_now(mud),
                                                        s->packet,
                                                        sizeof(s->packet),
@@ -2605,8 +2752,7 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
                 if (!packet_size)
                     continue;
 
-                memcpy(&tx_key[tx_n], &s->packet[packet_size - sizeof(tx_key[0])],
-                      sizeof(tx_key[0]));
+                tx_key[tx_n] = k;
                 s->size = packet_size;
                 s->path = NULL;
                 tx_n++;
@@ -2633,9 +2779,13 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
                 const uint64_t now = mud_now(mud);
 
                 pthread_mutex_lock(&mud->state_lock);
+                const int packet_mode =
+                    mud->conf.path_schedule == MUD_SCHEDULE_PACKET;
                 for (unsigned int t = 0; t < tx_n; t++) {
                     struct mud_tx_slot *s = &scratch->tx[t];
-                    struct mud_path *path = mud_select_path(mud, tx_key[t]);
+                    struct mud_path *path = packet_mode
+                                           ? mud_select_path_rr(mud)
+                                           : mud_select_path(mud, tx_key[t]);
 
                     if (!path)
                         continue;
@@ -2673,7 +2823,7 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
                 const int wn = mud_recv_finish(mud, sock_index, &rs->msg,
                                                &rs->remote, rs->packet,
                                                rs->len, out, sizeof(out),
-                                               &path_hold);
+                                               timetolerance, &path_hold);
                 if (wn <= 0)
                     continue;
 
