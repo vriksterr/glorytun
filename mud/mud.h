@@ -54,54 +54,6 @@ enum mud_state {
     MUD_LAST,
 };
 
-/* Tunnel-wide (mud_conf.path_schedule), not per-path: which algorithm
- * mud_worker_loop()'s TX half and mud_send() use to pick a path for each
- * outgoing packet. Both were tested directly (see docs/architecture.md's
- * "Path scheduling" section) rather than assumed:
- *
- * MUD_SCHEDULE_FLOW (default) hashes the plaintext packet's 5-tuple
- * before encryption (mud_flow_hash()) so every packet of one flow rides
- * the same path as long as path weights don't change. Fixes the failure
- * mode where a single ordered-delivery flow (almost always TCP) gets its
- * packets scattered across every sub-flow and mistakes the resulting
- * reordering for loss -- confirmed live: one TCP stream over
- * `connections 4` on a single physical link measured ~25% *lower*
- * throughput than `connections 1`, purely from this, with nothing else
- * different about the path. Costs nothing for the common case of many
- * concurrent flows sharing a tunnel -- different flows hash to different
- * points in the same weighted range, so aggregate traffic still spreads
- * across every path, just without needlessly reordering any single flow.
- *
- * MUD_SCHEDULE_PACKET picks per packet regardless of flow (smooth
- * weighted round-robin, mud_select_path_rr() -- same algorithm nginx
- * uses for upstream load balancing), deliberately accepting the
- * reordering FLOW mode avoids. The one thing it can do that FLOW mode
- * structurally cannot: let a *single* flow exceed one path's own
- * capacity by drawing on several paths at once, which matters
- * specifically when there's real independent capacity being left unused
- * by a lone flow (confirmed live: one TCP stream striped across 4
- * genuinely independent 150Mbit paths measured ~152Mbit average,
- * exceeding any single path's own cap; the same stream under FLOW mode
- * stayed near ~116Mbit, i.e. one path's share). Best paired with a
- * `reorderwindow` sized to the real cross-path latency spread on links
- * that have one.
- *
- * Smooth WRR (rather than a plain random per-packet cursor) guarantees
- * every RUNNING path is chosen in proportion to its select_weight within
- * any short run of selections, not just in the long-run statistical
- * average a random cursor eventually converges to. Tested directly
- * against plain random (N=4 samples each, same hardware, same session)
- * and the two were statistically indistinguishable on average
- * throughput (146 vs 147 Mbit) -- WRR is not a proven throughput win
- * over simpler randomness. It's used anyway because the even-
- * distribution guarantee is a real, independently useful property
- * (bounds how unlucky any single short window of packets can be) even
- * where it didn't move the average in testing so far. */
-enum mud_schedule {
-    MUD_SCHEDULE_FLOW = 0,
-    MUD_SCHEDULE_PACKET,
-};
-
 enum mud_path_status {
     MUD_DELETING = 0,
     MUD_PROBING,
@@ -155,17 +107,6 @@ struct mud_conf {
      * honors this -- the single-packet mud_recv()/mud_send() API is
      * unaffected, by design (see mud_worker_loop's own doc comment). */
     uint64_t reorder_window;
-    /* enum mud_schedule's value -- see that enum's own comment for what
-     * FLOW vs PACKET actually do and the measurements behind each.
-     * uint64_t rather than the enum type itself because mud_set()'s
-     * request/response wire form carries it pre-shifted
-     * ((value << 1) | 1) when explicitly requested, the same encoding
-     * struct mud_path_conf.pref/fixed_rate already use elsewhere in this
-     * file -- precisely so MUD_SCHEDULE_FLOW (0) can still be requested
-     * explicitly and isn't indistinguishable from "field left unset".
-     * mud->conf.path_schedule itself, once mud_set() has decoded it, is
-     * always a plain, unshifted enum mud_schedule value. */
-    uint64_t path_schedule;
 };
 
 union mud_sockaddr {
@@ -245,19 +186,6 @@ struct mud_path {
                               * alone -- still each sub-flow's own genuine
                               * measured throughput, for display/diagnostics
                               * and for its own AIMD growth/decay. */
-    int64_t select_credit; /* smooth weighted round-robin state for
-                             * mud_select_path_rr() (MUD_SCHEDULE_PACKET
-                             * only -- see enum mud_schedule) -- accumulates
-                             * by select_weight each selection round,
-                             * decremented by the group total when picked.
-                             * Guarantees each RUNNING path is chosen in
-                             * proportion to its weight within any short run
-                             * of selections, not just in the long-run
-                             * statistical average. Reset to 0 whenever a
-                             * path leaves MUD_RUNNING (alongside
-                             * select_weight, same place) so stale credit
-                             * from a previous run never skews it after it
-                             * comes back. */
     uint64_t idle;
     int traffic_idle; /* no real traffic in the last second; loss_live is
                         * stale/unmeasured while this is set -- see

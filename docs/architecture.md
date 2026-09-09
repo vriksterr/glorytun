@@ -74,18 +74,6 @@ BSD-style TUN devices include a four-byte address-family header. `src/tun.c`
 adds or removes it on macOS and OpenBSD; Linux uses `IFF_NO_PI` and transfers
 plain IP packets.
 
-Every UDP socket `mud_setup_socket()` opens requests an 8 MiB `SO_RCVBUF`/
-`SO_SNDBUF` (`MUD_SOCK_BUF_SIZE` in `mud.c`), best-effort -- a platform or
-sandbox that rejects the request still gets a working socket, just with
-whatever smaller default the OS provides. This isn't cosmetic: verified
-directly under sustained multi-connection load, the OS default was small
-enough that bursts overflowed the receive buffer and `/proc/net/snmp`'s
-`Udp: RcvbufErrors` climbed into the thousands per few seconds of burst;
-with the larger buffer, the same burst produced zero. `net.core.rmem_max`/
-`wmem_max` still cap what `setsockopt()` can actually obtain, so raising
-this constant alone does nothing on a host whose sysctl ceiling sits below
-it.
-
 ## Control plane
 
 Each `bind` process creates a Unix datagram socket named after its TUN device in
@@ -96,8 +84,7 @@ more replies, print the result, and remove their socket.
 The request types are:
 
 * `CTL_STATUS` — PID, MTU, cipher, and endpoints;
-* `CTL_CONF` — tunnel-wide key-exchange, clock, keepalive, and
-  path-scheduling values;
+* `CTL_CONF` — tunnel-wide key-exchange, clock, and keepalive values;
 * `CTL_PATH_STATUS` — a streamed list of matching paths;
 * `CTL_PATH_CONF` — path state, preference, loss, beat, and rates; and
 * `CTL_ERRORS` — decryption, clock, and key-exchange counters.
@@ -133,64 +120,16 @@ its own. Neither figure is fabricated from too little evidence: while a path
 has carried no real traffic in the last second, both hold their last reading
 rather than computing a percentage from a single sparse heartbeat.
 
-## Path scheduling
-
-`mud_conf.path_schedule` (`glorytun set ... flow|packet`) chooses how
-`mud_send()` and `mud_worker_loop()`'s TX half pick a path for each
-outgoing packet, tunnel-wide, at runtime. Both modes were verified directly
-against real traffic, not just reasoned about -- see "Packet resequencing"
-below for what each one costs and buys.
-
-* **`flow` (`MUD_SCHEDULE_FLOW`, the default)**: `mud_flow_hash()` hashes
-  the plaintext packet's 5-tuple (protocol, src/dst address, src/dst port)
-  *before* encryption, so every packet belonging to one flow rides the same
-  path for as long as path weights don't change. This is what keeps a
-  single ordered-delivery stream (almost always TCP) from mistaking
-  cross-path reordering for loss -- see "Packet resequencing". Verified
-  directly: a single flow over 4 equally-weighted paths that previously lost
-  roughly a quarter of its throughput to reordering-triggered retransmits
-  under per-packet scheduling instead pins cleanly to one path and measures
-  at that path's own full capacity.
-* **`packet` (`MUD_SCHEDULE_PACKET`)**: `mud_select_path_rr()` picks a path
-  per packet regardless of flow, deliberately accepting the reordering
-  `flow` mode avoids, in exchange for letting one flow's traffic spread
-  across every path and exceed a single path's own capacity -- useful when
-  a single connection's bandwidth-delay product is the bottleneck rather
-  than per-flow fairness. It uses smooth weighted round-robin, the same
-  algorithm nginx uses for upstream load balancing (`credit += weight; pick
-  the path with the highest running credit; that path's credit -= the
-  group's total weight`) rather than a plain weighted-random pick, so every
-  `RUNNING` path is chosen in proportion to its weight within any short run
-  of selections, not just in the long-run average a random cursor
-  eventually converges to. Verified directly: 4 equal-weight paths sending
-  one flow's packets measured near-identical simultaneous throughput on
-  every sample (e.g. 252.37/252.36/252.36/252.37 Mbps), the signature of
-  genuinely even distribution. Pairing this mode with `reorderwindow`
-  (below) is usually what you want, since the reordering it introduces is
-  deliberate, not incidental.
-
-Smooth WRR was also compared directly against plain per-packet weighted
-randomness under otherwise identical conditions (N=4 samples each, same
-run) and the two were statistically indistinguishable on throughput (146 vs
-147 Mbit average) -- WRR is not a proven throughput win by itself. It's
-used anyway because the even-distribution guarantee is a real, independently
-useful property when packet-level fairness matters (e.g. avoiding one path
-in a group going idle for a stretch purely by chance), and it costs nothing
-extra over a random pick.
-
 ## Packet resequencing
 
-Multipath striping under `packet` scheduling (see "Path scheduling" above)
-selects a path per packet, weighted by measured capacity -- not per flow.
-A single ordered protocol's packets (almost always TCP) crossing several
-physical paths at once routinely arrive out of order at the far end, since
-paths differ in latency. TCP reads that as loss (duplicate ACKs, fast
-retransmit) and throttles itself, even though nothing was actually
-dropped -- this is why a single flow under `packet` scheduling measures far
-below a multipath tunnel's combined throughput while several concurrent
-flows, run in parallel, add up to close to it. `flow` scheduling (the
-default) avoids this by construction, at the cost of a single flow never
-exceeding the capacity of the one path it's pinned to.
+Multipath striping (see `mud_select_path()`, above) selects a path per
+packet, weighted by measured capacity -- not per flow. A single ordered
+protocol's packets (almost always TCP) crossing several physical paths at
+once routinely arrive out of order at the far end, since paths differ in
+latency. TCP reads that as loss (duplicate ACKs, fast retransmit) and
+throttles itself, even though nothing was actually dropped -- this is why a
+single flow measures far below a multipath tunnel's combined throughput
+while several concurrent flows, run in parallel, add up to close to it.
 
 `mud_conf.reorder_window` (`glorytun set ... reorderwindow DURATION`,
 default off) addresses this at the transport layer, so it benefits every

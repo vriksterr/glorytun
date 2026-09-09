@@ -485,9 +485,7 @@
       <li><a href="#health">Path health</a></li>
       <li><a href="#mtu">Fixed MTU</a></li>
       <li><a href="#subflows">UDP sub-flow bonding</a></li>
-      <li><a href="#scheduling">Path scheduling</a></li>
       <li><a href="#reorder">Packet resequencing</a></li>
-      <li><a href="#buffers">Socket buffering</a></li>
     </ul>
 
     <div class="group-label">Commands</div>
@@ -497,7 +495,6 @@
       <li><a href="#cmd-list">list</a></li>
       <li><a href="#cmd-show">show</a></li>
       <li><a href="#cmd-set">set</a></li>
-      <li class="sub"><a href="#cmd-set">— flow / packet</a></li>
       <li><a href="#cmd-path">path</a></li>
       <li class="sub"><a href="#cmd-path">— up / down</a></li>
       <li class="sub"><a href="#cmd-path">— rtt / stat</a></li>
@@ -513,7 +510,6 @@
       <li><a href="#changelog">MTU rewrite</a></li>
       <li><a href="#changelog-subflows">Sub-flow bonding</a></li>
       <li><a href="#changelog-reorder">Packet resequencing</a></li>
-      <li><a href="#changelog-scheduling">Path scheduling + buffers</a></li>
     </ul>
   </nav>
 
@@ -683,44 +679,9 @@ pppoe-ISP1_WAN  index 23  103.86.175.108 -&gt; 2.27.157.112.5000
       <p class="note">Requires two samples a second apart, so it only produces a real number in <code class="inline">watch</code> mode — a one-shot <code class="inline">glorytun path</code> query has nothing prior to diff against and shows <code class="inline">-</code>. Shown on the default and <code class="inline">stat</code> views, not <code class="inline">rtt</code>, which stays RTT-only on purpose.</p>
     </section>
 
-    <section id="scheduling" class="wide">
-      <h2><span class="num">§</span>Path scheduling — <code class="inline">flow</code> vs <code class="inline">packet</code>, a later session</h2>
-      <p style="max-width:74ch">Every session above this one built on the assumption baked into <code class="inline">mud_select_path()</code>: pick a path per <em>packet</em>, weighted by capacity, full stop. That's what makes <a href="#reorder">packet resequencing</a> necessary in the first place — a single TCP flow's packets scattered across paths with different RTT is what causes the reordering-as-loss problem <code class="inline">reorderwindow</code> exists to paper over. This session asked a more basic question instead: does a single flow actually need to be scattered at all?</p>
-      <p style="max-width:74ch">The answer is a new tunnel-wide, live-switchable setting, <code class="inline">glorytun set ... flow|packet</code>, rather than a fixed behavior:</p>
-
-      <div class="thread-grid">
-        <div class="card">
-          <h4><code class="inline">flow</code> — the new default</h4>
-          <p>New <code class="inline">mud_flow_hash()</code> hashes the plaintext packet's 5-tuple (protocol, src/dst address, src/dst port) <em>before</em> encryption, so the existing weighted-random walk in <code class="inline">mud_select_path()</code> gets a stable key per flow instead of one that changes every packet. Every packet of one flow now rides the same path, for as long as that path's weight doesn't change. No new selection algorithm — same function, a stable input.</p>
-        </div>
-        <div class="card">
-          <h4><code class="inline">packet</code> — the old default, now opt-in</h4>
-          <p>New <code class="inline">mud_select_path_rr()</code>, a genuinely different algorithm: smooth weighted round-robin (the same one nginx uses for upstream load balancing) instead of weighted-random. Picks per packet regardless of flow, same as every prior session assumed — now a deliberate choice for when one flow's bandwidth-delay product, not per-flow fairness, is the bottleneck. <a href="#reorder">Packet resequencing</a> is what makes this mode usable for an ordered protocol; pair the two.</p>
-        </div>
-      </div>
-
-      <p style="max-width:74ch">Both were verified against real traffic, not just written. A single TCP flow over 4 equally-weighted paths, previously losing roughly a quarter of its throughput to reordering-triggered retransmits under the old always-per-packet behavior, pins cleanly to one path under <code class="inline">flow</code> and measures at that path's own full capacity — no code downstream of path selection needed to change for this to work.</p>
-
-      <div class="term">
-        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">glorytun set dev gt0 packet — smooth WRR, 4 equal paths, one flow</span></div>
-        <pre><span class="prompt">root@joy:~#</span> glorytun set dev gt0 packet
-set dev gt0 kxtimeout 1h timetolerance 10m keepalive 25s reorderwindow 0 schedule packet
-<span class="dim">watching path status during a single-flow transfer:</span>
-  ├─ 0  <span class="ok-text">running</span>  tx 252.37mbps  rx -  ...
-  ├─ 1  <span class="ok-text">running</span>  tx 252.36mbps  rx -  ...
-  ├─ 2  <span class="ok-text">running</span>  tx 252.36mbps  rx -  ...
-  └─ 3  <span class="ok-text">running</span>  tx 252.37mbps  rx -  ...</pre>
-      </div>
-      <p class="note">Near-identical simultaneous throughput on every sample, from one flow — the signature of genuinely even packet distribution across all four, not an average that only converges over time.</p>
-
-      <p style="max-width:74ch">Smooth WRR was picked over a plain per-packet weighted-random cursor (the mechanism <code class="inline">mud_select_path()</code> already had) for a specific guarantee: every <code class="inline">RUNNING</code> path gets chosen in proportion to its weight within any <em>short</em> run of selections, not just in the long-run average a random cursor eventually converges to — <code class="inline">credit += weight</code> each round, pick whichever path has the highest running credit, subtract the group's total weight from the one picked. Tested directly against the existing random-cursor code, same hardware, same session, N=4 samples each: <strong>146 vs 147 Mbit average</strong> — statistically indistinguishable on throughput. WRR is not a proven throughput win by itself. It earns its place anyway because the even-distribution guarantee is real and independently useful (no path in a group going quiet for a stretch purely by chance) and costs nothing extra over the random pick it replaced.</p>
-
-      <p style="max-width:74ch" class="note"><strong>A trap found the same way the MTU and resequencing bugs above were — by running it, not reasoning about it:</strong> a path brought up with no <code class="inline">rate</code> at all passed control/keepalive traffic normally but never carried a single real data packet, under either scheduling mode, indefinitely — indistinguishable from a healthy path in <code class="inline">path</code> status output. Root cause has nothing to do with this session's own changes: in the default <code class="inline">fixed</code> rate mode, a path's <code class="inline">select_weight</code> (what both <code class="inline">mud_select_path()</code> and the new <code class="inline">mud_select_path_rr()</code> require to be nonzero before a path can be chosen at all) is derived from <code class="inline">tx.rate</code>, and <code class="inline">tx.rate</code> in <code class="inline">fixed</code> mode is <em>only</em> ever set by an explicit <code class="inline">rate</code> — there's no fallback that derives it from observed traffic. A path with no configured rate starts, and stays, at zero weight forever: it can never carry the very traffic that might otherwise inform its rate. Always bring a path up with <code class="inline">rate tx ... rx ...</code> set.</p>
-    </section>
-
     <section id="reorder" class="wide">
       <h2><span class="num">§</span>Packet resequencing — <code class="inline">reorderwindow</code></h2>
-      <p style="max-width:74ch">Under <code class="inline">packet</code> scheduling (see <a href="#scheduling">Path scheduling</a>, a later session than this one) <code class="inline">mud_select_path()</code>/<code class="inline">mud_select_path_rr()</code> schedule per <em>packet</em>, weighted by measured capacity — not per flow. Every packet of a single TCP connection can land on a different physical path depending on which one gets picked that moment, and since paths differ in RTT, those packets routinely arrive out of order at the far end. TCP reads that as loss — duplicate ACKs, fast retransmit — and throttles itself, even though nothing was actually dropped. This is the reason one <code class="inline">iperf3</code> stream measures far below what several parallel streams add up to over the same bonded link: each stream individually eats the same reordering penalty, but running several in parallel lets their sum still saturate the link even while each one is throttled. <code class="inline">flow</code> scheduling (the default since the session above) sidesteps this by construction, at the cost of one flow never exceeding the capacity of the single path it's pinned to — this section's guidance applies specifically to <code class="inline">packet</code> mode, where it's worth pairing with <code class="inline">reorderwindow</code> below rather than something every deployment needs.</p>
+      <p style="max-width:74ch"><code class="inline">mud_select_path()</code> schedules per <em>packet</em>, weighted by measured capacity — not per flow. Every packet of a single TCP connection can land on a different physical path depending on which one the weighted walk picks that moment, and since paths differ in RTT, those packets routinely arrive out of order at the far end. TCP reads that as loss — duplicate ACKs, fast retransmit — and throttles itself, even though nothing was actually dropped. This is the reason one <code class="inline">iperf3</code> stream measures far below what several parallel streams add up to over the same bonded link: each stream individually eats the same reordering penalty, but running several in parallel lets their sum still saturate the link even while each one is throttled.</p>
 
       <div class="thread-grid">
         <div class="card">
@@ -883,8 +844,8 @@ dev gt0 keepalive 25s timetolerance 10m kxtimeout 1h</pre>
     <section id="cmd-set">
       <div class="cmd">
         <div class="cmd-head">
-          <code>glorytun set [dev NAME] [kxtimeout T] [timetolerance T] [keepalive T] [reorderwindow T] [flow|packet]</code>
-          <span class="tag new">flow / packet is new</span>
+          <code>glorytun set [dev NAME] [kxtimeout T] [timetolerance T] [keepalive T] [reorderwindow T]</code>
+          <span class="tag new">reorderwindow is new</span>
         </div>
         <div class="cmd-body">
           <p>Changes tunnel-level properties on a running <code class="inline">bind</code> process.</p>
@@ -894,13 +855,6 @@ dev gt0 keepalive 25s timetolerance 10m kxtimeout 1h</pre>
           <p><code class="inline">reorderwindow</code> — see <a href="#reorder">Packet resequencing</a>. Off by default; only affects the receiving side of whatever traffic you're trying to help.</p>
           <div class="term">
             <pre><span class="prompt">root@joy:~#</span> glorytun set dev gt0 reorderwindow 20ms</pre>
-          </div>
-          <p><code class="inline">flow</code> / <code class="inline">packet</code> — see <a href="#scheduling">Path scheduling</a>. Live, no restart needed. <code class="inline">flow</code> is the default and, unlike the duration settings above, can be explicitly restored through this command rather than only ever raised.</p>
-          <div class="term">
-            <pre><span class="prompt">root@joy:~#</span> glorytun set dev gt0 packet
-set dev gt0 kxtimeout 1h timetolerance 10m keepalive 25s reorderwindow 0 schedule packet
-<span class="prompt">root@joy:~#</span> glorytun set dev gt0 flow
-set dev gt0 kxtimeout 1h timetolerance 10m keepalive 25s reorderwindow 0 schedule flow</pre>
           </div>
         </div>
       </div>
@@ -1236,59 +1190,12 @@ libsodium 10.3</pre>
       </div>
     </section>
 
-    <section id="changelog-scheduling" class="wide">
-      <h2><span class="num">§</span>What changed — a later session, path scheduling and socket buffers</h2>
-      <div class="dek">Started from a real dual-ISP OpenWrt deployment reporting upload far below download over the same multipath tunnel — root-caused to the always-per-packet scheduling every session above this one built on top of. Tested end to end on two paired real VMs the whole way through, not simulated or left uncompiled — see the closing note on this page, which no longer fully applies to this session's own work.</div>
-      <div class="changelog">
-        <div class="item">
-          <div class="file">mud/mud.h</div>
-          <div>
-            <p>New <code class="inline">enum mud_schedule { MUD_SCHEDULE_FLOW = 0, MUD_SCHEDULE_PACKET }</code> and <code class="inline">mud_conf.path_schedule</code> — a <code class="inline">uint64_t</code>, not the enum directly, so it can carry the same shift-encoded wire value (<code class="inline">(value &lt;&lt; 1) | 1</code>) <code class="inline">pref</code>/<code class="inline">fixed_rate</code> already use, letting the zero-value default (<code class="inline">flow</code>) still be explicitly requested rather than indistinguishable from "unset."</p>
-            <p>New <code class="inline">int64_t select_credit</code> on <code class="inline">struct mud_path</code>, next to <code class="inline">select_weight</code> — smooth-WRR bookkeeping for <code class="inline">mud_select_path_rr()</code>, reset to <code class="inline">0</code> alongside <code class="inline">select_weight</code> whenever a path leaves <code class="inline">MUD_RUNNING</code> so stale credit from a previous run can't skew it after the path comes back.</p>
-          </div>
-        </div>
-        <div class="item">
-          <div class="file">mud/mud.c</div>
-          <div>
-            <p><strong><code class="inline">mud_flow_hash()</code></strong> — hashes the plaintext packet's 5-tuple before encryption (fixed 37-byte stack buffer, FNV-1a, no allocation). <code class="inline">mud_send()</code> and <code class="inline">mud_worker_loop()</code>'s TX pass now call it to get <code class="inline">mud_select_path()</code>'s existing selection key, instead of deriving that key from the raw ciphertext tail the way every prior session's code did — the actual mechanism behind the reordering problem <a href="#reorder">packet resequencing</a> exists to paper over. Caught one real bug before it ever reached a VM: the first cut's <code class="inline">unsigned char key[36]</code> could write to <code class="inline">key[36]</code> for an IPv6 5-tuple, one past the end — an off-by-one from a hardcoded size instead of a conditional one, caught by <code class="inline">-Wall -Wextra</code>'s <code class="inline">array-bounds</code> warning before it shipped anywhere.</p>
-            <p><strong><code class="inline">mud_select_path_rr()</code></strong> — smooth weighted round-robin, the <code class="inline">MUD_SCHEDULE_PACKET</code> counterpart to the now-flow-hash-keyed <code class="inline">mud_select_path()</code>. Both TX call sites (<code class="inline">mud_send()</code>, the worker loop's batch TX pass) branch on <code class="inline">mud-&gt;conf.path_schedule</code> to pick between the two.</p>
-            <p><strong><code class="inline">MUD_SOCK_BUF_SIZE (1 &lt;&lt; 23)</code></strong> — 8&nbsp;MiB, requested via <code class="inline">SO_RCVBUF</code>/<code class="inline">SO_SNDBUF</code> in <code class="inline">mud_setup_socket()</code>, best-effort. See <a href="#buffers">Socket buffering</a> for the measured before/after this session ran, closing the loop this page's own earlier note left open.</p>
-            <p><strong>One redundant lock removed from the RX hot path.</strong> <code class="inline">mud_recv_finish()</code> used to lock <code class="inline">state_lock</code> once just to read <code class="inline">mud_conf.timetolerance</code>, then again for the real decrypt/lookup work every packet needs regardless. It now takes a caller-supplied <code class="inline">timetolerance</code> snapshot instead — <code class="inline">mud_recv()</code> and <code class="inline">mud_worker_loop()</code> each read it once under lock, per call and per poll iteration respectively, rather than once per packet — and only locks internally on the rare clock-check failure branch. A value up to one worker-loop iteration (~100ms) stale is harmless here, same staleness already accepted for <code class="inline">reorder_window</code> elsewhere in this file; the real, unavoidable locked section (path lookup, rx stat bookkeeping) is unchanged.</p>
-          </div>
-        </div>
-        <div class="item">
-          <div class="file">src/set.c</div>
-          <div>
-            <p>New mutually-exclusive <code class="inline">flow</code>/<code class="inline">packet</code> flags (the same <code class="inline">.grp</code> pattern the existing <code class="inline">ratez[]</code> "fixed"/"auto" pair already uses), encoded with the same shift trick as <code class="inline">mud.h</code>'s new field, and echoed in the command's confirmation printf alongside the existing <code class="inline">kxtimeout</code>/<code class="inline">timetolerance</code>/<code class="inline">keepalive</code>/<code class="inline">reorderwindow</code> fields.</p>
-          </div>
-        </div>
-        <div class="item">
-          <div class="file">Real-VM findings, not code changes</div>
-          <div>
-            <p><strong>Smooth WRR vs. the plain weighted-random cursor already in <code class="inline">mud_select_path()</code>: statistically tied on throughput</strong> (146 vs 147 Mbit, N=4 each). Shipped anyway for the even-distribution guarantee, not a throughput claim — see <a href="#scheduling">Path scheduling</a>.</p>
-            <p><strong>A path brought up with no <code class="inline">rate</code> can never carry data, in either scheduling mode, forever</strong> — not a bug introduced here, a pre-existing property of the default <code class="inline">fixed</code> rate mode's <code class="inline">select_weight</code> derivation, caught only because this session's testing insisted on watching real byte counters move rather than trusting <code class="inline">running</code> status. See <a href="#scheduling">Path scheduling</a> for the mechanism.</p>
-            <p><strong>Verified the OpenWrt production report's own two claims directly against this codebase</strong> rather than assuming: <code class="inline">rate tx 400mbit</code> on a <code class="inline">connections 8</code> path is the ceiling for that whole group, not divided per sub-flow — confirmed by tracing <code class="inline">mud_update()</code>'s <code class="inline">select_weight</code> computation and reproduced with real <code class="inline">tc</code>-shaped bandwidth caps at multiple sample rates. The actual root cause of that deployment's reported "degraded, only 1430 and below works" was PPPoE's 8-byte encapsulation overhead shrinking the usable IP MTU from 1500 to 1492 — a path-config mismatch, not a code defect.</p>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section id="buffers" class="wide">
-      <h2><span class="num">§</span>Socket buffering — reintroduced and proven, a later session</h2>
-      <p style="max-width:74ch">An earlier session (see the note this replaces, kept in spirit below) tried a <code class="inline">SO_RCVBUF</code>/<code class="inline">SO_SNDBUF</code> increase after <code class="inline">nstat</code> caught live, climbing kernel-level UDP receive-buffer drops under load, then reverted it on request to isolate that session's MTU fix on its own. This session brought it back and, this time, measured the before/after directly rather than trusting the mechanism on reasoning alone.</p>
-      <p style="max-width:74ch"><code class="inline">mud_setup_socket()</code> now requests an 8&nbsp;MiB <code class="inline">SO_RCVBUF</code>/<code class="inline">SO_SNDBUF</code> on every socket it opens (<code class="inline">MUD_SOCK_BUF_SIZE</code>), best-effort — a platform or sandbox that rejects it still gets a working socket at whatever smaller default the OS provides. Verified with an identical 8-parallel-stream burst run twice, once against a build with the old (unset, OS-default) buffer size and once against this one, everything else held constant:</p>
-      <div class="term">
-        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">8-parallel-stream burst, server-side /proc/net/snmp delta, 8 seconds</span></div>
-        <pre><span class="dim">                    throughput      retransmits      RcvbufErrors
-before (OS default)   907 Mbit/s        10,900     <span class="crit-text">10,563</span>
-after (8 MiB)          932 Mbit/s         4,376             <span class="ok-text">0</span></span></pre>
-      </div>
-      <p class="note">Not a marginal difference — receive-buffer-overflow drops went from over ten thousand to exactly zero under identical burst load, and that alone dragged retransmits down by 60% and throughput up, with no other variable changed between the two runs. <code class="inline">net.core.rmem_max</code>/<code class="inline">wmem_max</code> still cap what <code class="inline">setsockopt()</code> can actually obtain — raising the constant alone does nothing on a host whose sysctl ceiling sits below it, so check that ceiling before assuming this is active on a given box.</p>
-      <p class="note" style="margin-top:1rem"><strong>Original note, superseded by the above:</strong> a <code class="inline">SO_RCVBUF</code>/<code class="inline">SO_SNDBUF</code> increase was tried and reverted on request in an earlier session, to isolate that session's MTU fix on its own — flagged then as worth revisiting if buffer drops showed up again independently. They did, and this session is that revisit.</p>
+    <section class="wide" style="margin-top:-2rem">
+      <p class="note" style="font-family:var(--sans);color:var(--text-dim);font-size:0.85rem"><strong>Tried and reverted, on request:</strong> a <code class="inline">SO_RCVBUF</code>/<code class="inline">SO_SNDBUF</code> increase in <code class="inline">mud_setup_socket()</code>, after <code class="inline">nstat -az UdpRcvbufErrors UdpInErrors</code> confirmed live, climbing kernel-level UDP receive-buffer drops on the server -- a real, separate cause of elevated RX-LOSS with no code bug involved, distinct from the MTU issue above. Reverted to isolate the MTU fix on its own; worth revisiting if buffer drops reappear independently.</p>
     </section>
 
     <footer class="page-end">
-      Everything above the <a href="#reorder">packet resequencing</a> section (MTU rewrite, sub-flow bonding) was written without ever compiling or running it — no Linux toolchain was available in that environment. Resequencing was different: built and tested end to end, but only in a WSL2-simulated network (see that section) — real hardware, real ISPs, no substitute. <a href="#scheduling">Path scheduling</a> and <a href="#buffers">socket buffering</a> went further still: built and tested on two paired real VMs throughout, with real <code class="inline">tc</code>-shaped bandwidth caps, real <code class="inline">iperf3</code> traffic, and real <code class="inline">/proc/net/snmp</code> counters read before and after — including a real infrastructure detour when a test build's tunnel interface came up administratively down and a fresh path's un-seeded rate silently blocked all data traffic, both caught and fixed by watching real byte counters rather than trusting status output. Closer to production conditions than any session above it, but two paired VMs on one host still isn't two independent ISPs on real hardware. Build and smoke-test everything on target hardware before trusting any of it in production.
+      Everything above the <a href="#reorder">packet resequencing</a> section (MTU rewrite, sub-flow bonding) was written without ever compiling or running it — no Linux toolchain was available in that environment. Resequencing was different: built and tested end to end, but only in a WSL2-simulated network (see that section) — real hardware, real ISPs, no substitute. Build and smoke-test everything on target hardware before trusting any of it in production.
     </footer>
   </main>
 </div>
