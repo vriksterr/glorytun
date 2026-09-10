@@ -772,6 +772,14 @@ static int
 mud_setup_socket(int fd, int v4, int v6)
 {
     if ((mud_sso_int(fd, SOL_SOCKET, SO_REUSEADDR, 1)) ||
+#if defined SO_REUSEPORT
+        /* Lets mud_create() open several sockets bound to the same local
+         * port (see its own comment) instead of just one -- harmless here
+         * for a connections-N sub-flow socket, which always binds an
+         * OS-assigned ephemeral port of its own and so never actually
+         * shares a port with anything. */
+        (mud_sso_int(fd, SOL_SOCKET, SO_REUSEPORT, 1)) ||
+#endif
         (v4 && mud_sso_int(fd, IPPROTO_IP, MUD_PKTINFO, 1)) ||
         (v6 && mud_sso_int(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, 1)) ||
         (v6 && mud_sso_int(fd, IPPROTO_IPV6, IPV6_V6ONLY, !v4)))
@@ -957,6 +965,79 @@ mud_create(union mud_sockaddr *addr, unsigned char *key, int *aes)
     mud->sock_v4 = v4;
     mud->sock_v6 = v6;
     mud->sock_family = addr->sa.sa_family;
+
+    /* Verified directly: the passive side of a tunnel never calls
+     * mud_set_sock_count() (it doesn't know in advance how many sub-flows
+     * the peer will use), so without this it always has exactly one
+     * socket -- meaning mud_worker_loop()'s per-worker socket
+     * partitioning (see its own comment) has nothing to partition, and
+     * every inbound packet, from every one of the peer's connections-N
+     * sub-flows, is received and decrypted by whichever single worker
+     * thread owns that one socket. Measured on real hardware: one core
+     * pegged while the others sat mostly idle, regardless of how many
+     * sub-flows the sender used or how evenly connections-N divided
+     * across worker threads -- the sender-side fixes for that (matching
+     * connections to worker count) don't touch this at all, since the
+     * bottleneck is entirely on the receiving side.
+     *
+     * Opening mud_worker_count() sockets here instead of one, all bound
+     * to the same resolved local port via SO_REUSEPORT, lets the kernel
+     * itself spread inbound packets across them by hashing each packet's
+     * own source address/port -- the same technique high-throughput UDP
+     * servers (DNS, QUIC) use for multi-core receive scaling. A given
+     * remote peer's packets consistently land on the same one of these
+     * sockets (kernel-guaranteed per-flow consistency), and
+     * mud_get_path() already stores whichever socket index a path was
+     * first discovered on (see its own `sock` parameter) and keeps using
+     * it for replies -- so this needs no change anywhere else: existing
+     * per-worker socket ownership starts doing real work on every one of
+     * these sockets instead of just index 0.
+     *
+     * Every socket after the first binds to `addr`, already updated by
+     * the getsockname() above to the concrete resolved port (needed for
+     * the common "bind to port 0, let the OS pick one" case) rather than
+     * whatever the caller originally requested. Best-effort and capped by
+     * mud_worker_count() (at most MUD_WORKERS_MAX, well under
+     * MUD_SOCK_MAX): if SO_REUSEPORT isn't available on this platform, or
+     * opening an additional socket fails for any reason, this simply
+     * keeps whatever it already has rather than failing tunnel creation
+     * over a scaling improvement the original single socket never
+     * needed. A path with no explicit sub-flow configuration always sends
+     * via socket 0 regardless of how many of these exist (see struct
+     * mud_path_conf.sock's own default), so this is transparent to that
+     * case.
+     *
+     * NOT transparent to a caller that also uses connections N to build
+     * its own numbered sub-flow sockets on this same instance (glorytun's
+     * active side does, via src/bind.c's connections=N fan-out): that
+     * code relies on every sock index it hands out being its own genuinely
+     * distinct local port, since that's what lets the peer tell sub-flows
+     * apart at all -- and sockets [0, mud_worker_count()) here are
+     * deliberately the opposite, all sharing one port on purpose. Handing
+     * out indices from this reserved range to a connections=N group would
+     * silently collapse those sub-flows into one from the peer's point of
+     * view (identical source port). src/bind.c's own fan-out is
+     * responsible for skipping this reserved prefix -- see its comment
+     * where it computes `base_sock`, right next to the
+     * SO_REUSEPORT-collision bug that section exists to prevent, found by
+     * testing this exact interaction on paired VMs before this comment
+     * did. This file has no visibility into what a caller intends to do
+     * with sock indices later, so it cannot enforce that on its own. */
+    const unsigned int want_sock = mud_worker_count();
+
+    while (mud->sock_count < want_sock) {
+        int fd = socket(addr->sa.sa_family, SOCK_DGRAM, IPPROTO_UDP);
+
+        if ((fd == -1) ||
+            (mud_setup_socket(fd, v4, v6)) ||
+            (bind(fd, &addr->sa, addrlen))) {
+            if (fd != -1)
+                close(fd);
+            break;
+        }
+        mud->sock[mud->sock_count] = fd;
+        mud->sock_count++;
+    }
 
     mud->conf.keepalive     = 25 * MUD_ONE_SEC;
     mud->conf.timetolerance = 10 * MUD_ONE_MIN;

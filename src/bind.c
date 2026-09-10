@@ -471,6 +471,28 @@ gt_bind(int argc, char **argv, void *data)
                                 any = 1;
                             }
                             base_sock = any ? max_sock + 1 : 0;
+
+                            /* Sockets [0, worker_count) are mud_create()'s
+                             * own SO_REUSEPORT siblings, all bound to the
+                             * same local port for inbound receive scaling
+                             * (see its own comment) -- never safe to hand
+                             * out here, since this fan-out relies on every
+                             * sock index it assigns being its own distinct
+                             * local port so the peer can tell sub-flows
+                             * apart. Handing out sock 0..2 to the first
+                             * connections=N group used to collide with
+                             * that shared port directly: the peer saw
+                             * identical source ports for the first few
+                             * sub-flows and could only ever discover one
+                             * of them, the rest stuck at rtt 0 / "public
+                             * unknown" forever. Confirmed live on paired
+                             * VMs before this existed. `any` doesn't need
+                             * the same clamp -- an existing group's own
+                             * max_sock+1 is already past this prefix, by
+                             * induction on every group having gone through
+                             * this same check when it was first created. */
+                            if (base_sock < worker_count)
+                                base_sock = worker_count;
                         }
                         if ((uint64_t)base_sock + conn_count > MUD_SOCK_MAX) {
                             res.ret = ENOSPC;
