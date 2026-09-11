@@ -192,6 +192,13 @@ gt_bind(int argc, char **argv, void *data)
         gt_log("couldn't create mud\n");
         return -1;
     }
+    /* mud_create() already opened its own block of SO_REUSEPORT receive-
+     * scaling sockets (see its own comment) before returning -- captured
+     * here, once, right after creation, rather than assumed to equal
+     * mud_worker_count() (below): the two can differ (mud_create() scales
+     * past one-per-worker on purpose) and this is the only place that
+     * needs to agree with mud.c's own count instead of recomputing it. */
+    const unsigned int reserved_sock_count = mud_get_sock_count(mud);
     if (!chacha && !aes)
         gt_log("AES is not available, enjoy ChaCha20!\n");
 
@@ -472,27 +479,35 @@ gt_bind(int argc, char **argv, void *data)
                             }
                             base_sock = any ? max_sock + 1 : 0;
 
-                            /* Sockets [0, worker_count) are mud_create()'s
-                             * own SO_REUSEPORT siblings, all bound to the
-                             * same local port for inbound receive scaling
-                             * (see its own comment) -- never safe to hand
-                             * out here, since this fan-out relies on every
-                             * sock index it assigns being its own distinct
-                             * local port so the peer can tell sub-flows
-                             * apart. Handing out sock 0..2 to the first
-                             * connections=N group used to collide with
-                             * that shared port directly: the peer saw
-                             * identical source ports for the first few
-                             * sub-flows and could only ever discover one
-                             * of them, the rest stuck at rtt 0 / "public
-                             * unknown" forever. Confirmed live on paired
-                             * VMs before this existed. `any` doesn't need
-                             * the same clamp -- an existing group's own
-                             * max_sock+1 is already past this prefix, by
-                             * induction on every group having gone through
-                             * this same check when it was first created. */
-                            if (base_sock < worker_count)
-                                base_sock = worker_count;
+                            /* Sockets [0, reserved_sock_count) are
+                             * mud_create()'s own SO_REUSEPORT siblings, all
+                             * bound to the same local port for inbound
+                             * receive scaling (see its own comment) --
+                             * never safe to hand out here, since this
+                             * fan-out relies on every sock index it assigns
+                             * being its own distinct local port so the peer
+                             * can tell sub-flows apart. Handing out sockets
+                             * from that range to the first connections=N
+                             * group used to collide with the shared port
+                             * directly: the peer saw identical source
+                             * ports for the first few sub-flows and could
+                             * only ever discover one of them, the rest
+                             * stuck at rtt 0 / "public unknown" forever.
+                             * Confirmed live on paired VMs before this
+                             * existed. Deliberately reads
+                             * reserved_sock_count (captured once, right
+                             * after mud_create() returned) rather than
+                             * recomputing worker_count x
+                             * MUD_REUSEPORT_SCALE here -- this file has no
+                             * business knowing mud.c's internal scaling
+                             * factor, only how many sockets it actually
+                             * reserved. `any` doesn't need the same clamp
+                             * -- an existing group's own max_sock+1 is
+                             * already past this prefix, by induction on
+                             * every group having gone through this same
+                             * check when it was first created. */
+                            if (base_sock < reserved_sock_count)
+                                base_sock = reserved_sock_count;
                         }
                         if ((uint64_t)base_sock + conn_count > MUD_SOCK_MAX) {
                             res.ret = ENOSPC;

@@ -146,6 +146,16 @@ struct mud_keyx {
 
 #define MUD_WORKERS_MAX (8U)
 
+/* How many SO_REUSEPORT sockets mud_create() opens per worker thread for
+ * inbound receive scaling -- see its own comment for why one-per-worker
+ * alone isn't enough once a real deployment has many more remote
+ * sub-flows than local worker threads. 8 gives a 4-worker box 32 listen
+ * sockets (well under MUD_SOCK_MAX even at MUD_WORKERS_MAX workers: 8x8 =
+ * 64), enough bins that a realistic connections=N fan-out on the peer's
+ * side spreads across them without the whole tunnel funneling through a
+ * handful of sockets again. */
+#define MUD_REUSEPORT_SCALE (8U)
+
 /* Bounds the resequencing buffer used when mud_conf.reorder_window is
  * enabled (see mud_reorder_insert()/mud_reorder_flush() below). Fixed,
  * always allocated as part of struct mud -- same no-realloc rationale as
@@ -1012,18 +1022,43 @@ mud_create(union mud_sockaddr *addr, unsigned char *key, int *aes)
      * active side does, via src/bind.c's connections=N fan-out): that
      * code relies on every sock index it hands out being its own genuinely
      * distinct local port, since that's what lets the peer tell sub-flows
-     * apart at all -- and sockets [0, mud_worker_count()) here are
-     * deliberately the opposite, all sharing one port on purpose. Handing
-     * out indices from this reserved range to a connections=N group would
-     * silently collapse those sub-flows into one from the peer's point of
-     * view (identical source port). src/bind.c's own fan-out is
-     * responsible for skipping this reserved prefix -- see its comment
-     * where it computes `base_sock`, right next to the
+     * apart at all -- and these sockets are deliberately the opposite, all
+     * sharing one port on purpose. Handing out indices from this reserved
+     * range to a connections=N group would silently collapse those
+     * sub-flows into one from the peer's point of view (identical source
+     * port). src/bind.c's own fan-out is responsible for skipping this
+     * reserved prefix -- it asks mud_get_sock_count() right after
+     * mud_create() returns rather than assuming any particular size, so
+     * it stays correct regardless of the multiplier below. See its own
+     * comment where it computes `base_sock`, right next to the
      * SO_REUSEPORT-collision bug that section exists to prevent, found by
      * testing this exact interaction on paired VMs before this comment
      * did. This file has no visibility into what a caller intends to do
-     * with sock indices later, so it cannot enforce that on its own. */
-    const unsigned int want_sock = mud_worker_count();
+     * with sock indices later, so it cannot enforce that on its own.
+     *
+     * mud_worker_count() sockets is the minimum useful number -- one per
+     * worker thread -- but not necessarily enough on its own: the kernel
+     * spreads inbound packets across these sockets by hashing each one's
+     * *remote* address/port, and a real deployment routinely has many more
+     * distinct remote sub-flows than local worker threads (e.g. two
+     * physical links each split connections=8 is 16 remote sub-flows
+     * arriving at, say, a 4-worker box). Hashing 16 things into only 4
+     * bins produces real, sometimes large, per-bin variance even with a
+     * good hash -- confirmed live: even after this fix existed, one
+     * worker still measured roughly 3x another's CPU load in exactly this
+     * shape of deployment. Scaling the socket count well past the worker
+     * count gives the kernel many more bins to spread the same remote
+     * sub-flows across; each worker still ends up owning several of them
+     * (mud_worker_loop()'s existing striding), and the *sum* over several
+     * bins per worker has much lower relative variance than a single
+     * bin's share did, by the same law-of-large-numbers reasoning that
+     * makes averaging over more samples more stable. MUD_REUSEPORT_SCALE
+     * is a fixed multiplier rather than sized to the actual remote
+     * sub-flow count because this side has no way to know that count in
+     * advance -- it's whatever connections=N the peer independently
+     * chooses, possibly changed at runtime long after this socket pool is
+     * created. */
+    const unsigned int want_sock = mud_worker_count() * MUD_REUSEPORT_SCALE;
 
     while (mud->sock_count < want_sock) {
         int fd = socket(addr->sa.sa_family, SOCK_DGRAM, IPPROTO_UDP);
@@ -1412,7 +1447,58 @@ mud_update_loss(struct mud_loss_track *track, uint64_t now, int traffic_idle,
                 uint64_t sent_pkt, uint64_t recv_pkt)
 {
     if (traffic_idle) {
-        track->bucket_time = 0;
+        /* Real time keeps passing while idle, and the 60-second window
+         * this ring tracks needs to age accordingly -- otherwise a path
+         * that flips in and out of idle (routine for one sub-flow of a
+         * multipath bond, whose share of real traffic varies second to
+         * second) has its ring's rotation paused every time it goes
+         * quiet, freezing whatever old sum it last held. Age it by one
+         * empty (0 sent, 0 recv) bucket per elapsed second instead of
+         * leaving it untouched -- truthful, since no data moved during
+         * that time, and it correctly dilutes/evicts old samples exactly
+         * as if the path had gone on sending zero packets each second
+         * rather than stopping the clock.
+         *
+         * Deliberately does NOT reset bucket_time to 0 the way the old
+         * code did (and an earlier version of this fix still did) --
+         * that destroys the only reference point available to measure
+         * *further* elapsed idle time from, so aging would fire at most
+         * once (draining however few seconds had elapsed at that first
+         * instant, often just one) and then never again no matter how
+         * much longer the path stayed idle. Confirmed live with
+         * instrumented builds: sum_sent/sum_recv stayed stuck nonzero
+         * indefinitely with bucket_time pinned at 0 on every subsequent
+         * idle tick, silently skipping this whole block forever. Instead,
+         * bucket_time is only ever advanced here by the whole seconds
+         * just consumed, so the next tick (typically ~100ms later, well
+         * under a second) naturally accumulates toward the next
+         * whole-second threshold instead of losing its reference point.
+         * Capped at MUD_LOSS_SAMPLES: past a full window's worth of idle
+         * time every old sample has already aged out. */
+        if (!track->bucket_time) {
+            track->bucket_time = now;
+        } else {
+            uint64_t idle_secs = MUD_TIME_MASK(now - track->bucket_time)
+                                / MUD_ONE_SEC;
+
+            if (idle_secs) {
+                if (idle_secs > MUD_LOSS_SAMPLES)
+                    idle_secs = MUD_LOSS_SAMPLES;
+
+                for (uint64_t i = 0; i < idle_secs; i++) {
+                    track->sum_sent -= track->sample_sent[track->next];
+                    track->sum_recv -= track->sample_recv[track->next];
+                    track->sample_sent[track->next] = 0;
+                    track->sample_recv[track->next] = 0;
+                    track->next = (track->next + 1) % MUD_LOSS_SAMPLES;
+                }
+                *loss = (track->sum_sent && track->sum_sent >= track->sum_recv)
+                      ? (track->sum_sent - track->sum_recv) * 255U
+                           / track->sum_sent
+                      : 0;
+                track->bucket_time = now;
+            }
+        }
         track->bucket_sent = 0;
         track->bucket_recv = 0;
         return;
@@ -1799,6 +1885,30 @@ static uint64_t
 mud_path_track(struct mud *mud, struct mud_path *path, uint64_t now)
 {
     path->traffic_idle = mud_timeout(now, path->idle, MUD_ONE_SEC);
+
+    /* mud_update_loss()'s idle-aging branch (see its own comment) needs to
+     * be reached regularly and on a real clock for the ring it ages to
+     * ever fully drain a stale reading -- calling it here, once per
+     * mud_update() tick (~100ms), regardless of whether a message just
+     * arrived, is what provides that. Safe to call every tick: most calls
+     * see well under a second elapsed and do nothing (see that function's
+     * own bucket_time handling), only actually aging the ring once a
+     * whole second has genuinely passed. Confirmed live with an
+     * instrumented build: without this call site, tx-loss stayed stuck at
+     * its last real reading indefinitely, since mud_update_rl()'s own
+     * call to mud_update_loss() -- gated on the peer's reported byte
+     * counters increasing -- turned out to still fire regularly even with
+     * zero real data flowing (those raw counters include beat-message
+     * overhead, which keeps incrementing on its own), but always with
+     * traffic_idle already true at that point, so it landed in the same
+     * idle branch this does rather than the ring-rotating path -- neither
+     * call site draining anything without the fix below. */
+    if (path->traffic_idle) {
+        mud_update_loss(&path->msg.tx_loss, now, 1,
+                        &path->tx.loss, &path->tx.loss_live, 0, 0);
+        mud_update_loss(&path->msg.rx_loss, now, 1,
+                        &path->rx.loss, &path->rx.loss_live, 0, 0);
+    }
 
     if (path->conf.state != MUD_UP)
         return now;
