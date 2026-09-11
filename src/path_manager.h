@@ -22,9 +22,9 @@ struct gt_managed_path {
     union mud_sockaddr current_local;
     union mud_sockaddr bound_local;
     union mud_sockaddr remote;
-    unsigned char sock; /* mud socket-pool index this sub-flow uses; a
-                          * logical path with N sub-flows occupies N
-                          * gt_managed_path entries, one per sock 0..N-1 */
+    uint16_t sock; /* mud socket-pool index this sub-flow uses; a
+                     * logical path with N sub-flows occupies N
+                     * gt_managed_path entries, one per sock 0..N-1 */
     struct mud_path_conf desired_conf;
     int desired_up;
     int link_up;

@@ -11,8 +11,12 @@ gt_show_error(const char *name, struct mud_error *err)
     char addr[INET6_ADDRSTRLEN];
     gt_toaddr(addr, sizeof(addr), &err->addr);
 
-    printf("error %s count %"PRIu64" from %s.%"PRIu16"\n",
-            name, err->count, addr, gt_get_port(&err->addr));
+    if (err->addr.sa.sa_family == AF_INET6)
+        printf("error %s count %"PRIu64" from [%s]:%"PRIu16"\n",
+                name, err->count, addr, gt_get_port(&err->addr));
+    else
+        printf("error %s count %"PRIu64" from %s:%"PRIu16"\n",
+                name, err->count, addr, gt_get_port(&err->addr));
 }
 
 static int
@@ -48,12 +52,23 @@ gt_show_status(int fd)
     gt_toaddr(local, sizeof(local), &res.status.local);
     gt_toaddr(remote, sizeof(remote), &res.status.remote);
 
-    printf("tunnel %s\n"
-           "local  %s.%"PRIu16"\n"
-           "remote %s.%"PRIu16"\n"
-           "pid    %li\n"
-           "mtu    %zu\n"
-           "cipher %s\n",
+    /* local/remote always share one address family -- they're the two
+     * ends of a single UDP socket -- so one check covers both. */
+    const char *fmt = (res.status.local.sa.sa_family == AF_INET6)
+                     ? "tunnel %s\n"
+                       "local  [%s]:%"PRIu16"\n"
+                       "remote [%s]:%"PRIu16"\n"
+                       "pid    %li\n"
+                       "mtu    %zu\n"
+                       "cipher %s\n"
+                     : "tunnel %s\n"
+                       "local  %s:%"PRIu16"\n"
+                       "remote %s:%"PRIu16"\n"
+                       "pid    %li\n"
+                       "mtu    %zu\n"
+                       "cipher %s\n";
+
+    printf(fmt,
             res.tun_name,
             local, gt_get_port(&res.status.local),
             remote, gt_get_port(&res.status.remote),

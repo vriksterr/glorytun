@@ -70,7 +70,7 @@ struct gt_path_sample {
     int valid;
     char ifname[IFNAMSIZ];
     union mud_sockaddr remote;
-    unsigned char sock;
+    uint16_t sock;
     uint64_t tx_bytes, rx_bytes;
     uint64_t time_ns;
 };
@@ -179,8 +179,14 @@ gt_path_print_row(struct ctl_msg *res, int last)
     printf("  mtu %zu", res->path.mtu);
     if (gt_toaddr(tmp, sizeof(tmp), &res->path.remote))
         printf("  public unknown\n");
+    else if (res->path.remote.sa.sa_family == AF_INET6)
+        /* Bracketed, same convention as a URL or curl's own output --
+         * an IPv6 address is itself colon-delimited, so a bare
+         * address:port would be ambiguous about where the address ends
+         * and the port begins. */
+        printf("  public [%s]:%"PRIu16"\n", tmp, gt_get_port(&res->path.remote));
     else
-        printf("  public %s.%"PRIu16"\n", tmp, gt_get_port(&res->path.remote));
+        printf("  public %s:%"PRIu16"\n", tmp, gt_get_port(&res->path.remote));
 }
 
 static void
@@ -279,10 +285,16 @@ gt_path_status(int fd)
         else
             memcpy(index_str, "-", 2);
 
-        printf("%s  index %s  %s -> %s.%"PRIu16"\n",
-               rows[g].ifname[0] ? rows[g].ifname : "-",
-               index_str, local, remote,
-               gt_get_port(&rows[g].path.conf.remote));
+        if (rows[g].path.conf.remote.sa.sa_family == AF_INET6)
+            printf("%s  index %s  %s -> [%s]:%"PRIu16"\n",
+                   rows[g].ifname[0] ? rows[g].ifname : "-",
+                   index_str, local, remote,
+                   gt_get_port(&rows[g].path.conf.remote));
+        else
+            printf("%s  index %s  %s -> %s:%"PRIu16"\n",
+                   rows[g].ifname[0] ? rows[g].ifname : "-",
+                   index_str, local, remote,
+                   gt_get_port(&rows[g].path.conf.remote));
 
         for (unsigned int k = 0; k < member_count; k++) {
             printed[members[k]] = 1;

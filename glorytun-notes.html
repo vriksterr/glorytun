@@ -510,6 +510,7 @@
       <li><a href="#changelog">MTU rewrite</a></li>
       <li><a href="#changelog-subflows">Sub-flow bonding</a></li>
       <li><a href="#changelog-reorder">Packet resequencing</a></li>
+      <li><a href="#changelog-scaling">Scaling for many-core hardware</a></li>
     </ul>
   </nav>
 
@@ -559,6 +560,7 @@
         </div>
       </div>
       <p>Total participating threads on an <em>n</em>-core box is exactly <em>n</em> (capped at 9) — <em>n</em>−1 spawned workers plus the main thread, never <em>n</em>+1, which would oversubscribe the CPU for no benefit. See <code class="inline">bench multicore</code> below for a way to actually measure what this design costs in practice.</p>
+      <p class="note" style="font-family:var(--sans);color:var(--text-dim);font-size:0.88rem"><strong>Superseded by a later session:</strong> each worker now runs the <em>entire</em> per-packet pipeline itself (TUN read, encrypt/decrypt, path lookup, send) instead of only crypto — there's no separate main-thread-does-everything-else design anymore, and the cap moved from 8 to 32, with the count now operator-settable. See <a href="#changelog-scaling">Scaling for many-core hardware</a> for the current model and why the raised default alone turned out to be a real performance regression.</p>
     </section>
 
     <section id="health">
@@ -653,7 +655,7 @@
 
       <p style="max-width:74ch"><code class="inline">connections</code> requires <code class="inline">via IFACE</code> — rejected client-side for legacy <code class="inline">addr</code>-based paths, since only the interface-managed path table has anywhere durable to track and later shrink a sub-flow count across calls. Default is <code class="inline">1</code> (today's single-socket behavior, unchanged); <code class="inline">0</code>/unset leaves an existing path's count alone rather than resetting it. Shrinking a count later brings the excess sub-flows down the same way <code class="inline">path down</code> already does for a single path.</p>
 
-      <p style="max-width:74ch"><strong>The ceiling isn't a design opinion.</strong> <code class="inline">MUD_SOCK_MAX</code> is 256 — the range of <code class="inline">struct mud_path_conf.sock</code>, a single <code class="inline">unsigned char</code> — not a number picked for sounding reasonable. The pool grows to whatever <code class="inline">connections N</code> actually asks for, the same way <code class="inline">MUD_PATH_MAX</code> already grows <code class="inline">mud-&gt;paths</code> on demand.</p>
+      <p style="max-width:74ch"><strong>The ceiling isn't a design opinion.</strong> <code class="inline">MUD_SOCK_MAX</code> was originally 256 — the range of <code class="inline">struct mud_path_conf.sock</code>, a single <code class="inline">unsigned char</code> — not a number picked for sounding reasonable. The pool grows to whatever <code class="inline">connections N</code> actually asks for, the same way <code class="inline">MUD_PATH_MAX</code> already grows <code class="inline">mud-&gt;paths</code> on demand. Both ceilings, and the <code class="inline">unsigned char</code> field itself, were later raised — see <a href="#changelog-scaling">Scaling for many-core hardware</a>.</p>
 
       <p class="note" style="font-family:var(--sans);color:var(--text-dim);font-size:0.88rem">One real tradeoff, deliberately not fixed here: <code class="inline">bind</code>'s event loop still uses <code class="inline">select(2)</code>, which silently misbehaves once a tracked file descriptor's value reaches <code class="inline">FD_SETSIZE</code> (1024 on Linux). A handful to a few dozen sub-flows is fine on any normal process; requesting hundreds is where this would start to matter, and would call for switching to <code class="inline">poll()</code>/<code class="inline">epoll()</code> — out of scope here since it wasn't needed at the sizes this was actually built and asked for.</p>
 
@@ -799,15 +801,16 @@ set dev gt0 kxtimeout 1h timetolerance 10m keepalive 25s reorderwindow 20ms</pre
     <section id="cmd-bind">
       <div class="cmd">
         <div class="cmd-head">
-          <code>glorytun bind [dev NAME] [addr LOCAL_IP [PORT]] keyfile FILE [persist] [chacha] [qlen N]</code>
-          <span class="tag new">qlen is new</span>
+          <code>glorytun bind [dev NAME] [addr LOCAL_IP [PORT]] keyfile FILE [persist] [chacha] [qlen N] [workers N]</code>
+          <span class="tag new">workers is new</span>
         </div>
         <div class="cmd-body">
           <p>Starts the tunnel: creates/attaches the TUN device (on Linux, attaches to a pre-existing device of that name if one exists), opens the UDP socket, and runs the event loop until stopped. Runs in the foreground.</p>
           <p><code class="inline">persist</code> keeps the Linux TUN device alive when the process exits — useful with <code class="inline">via</code>-bound paths so netifd doesn't flap the interface across a crash/respawn. <code class="inline">chacha</code> forces the ChaCha20-Poly1305 fallback instead of negotiating AEGIS-256. <code class="inline">qlen</code> sets the TUN device's tx queue length (<code class="inline">txqueuelen</code>) once at startup — Linux defaults TUN/TAP interfaces to 500 (vs. 1000 for a typical Ethernet interface); raise it if real bulk traffic through the tunnel could burst past that. Unlike <code class="inline">mtu</code> on <code class="inline">path up</code>, this is a one-time value applied once when the interface is created, not something that needs to keep tracking path config afterward.</p>
+          <p><code class="inline">workers</code> sets exactly how many worker threads to run, overriding the automatic <code class="inline">cores − 1</code> default. Every worker thread shares one poll wakeup on the TUN device (see <a href="#threading">Threading model</a>), so more of them than you have real <code class="inline">connections N</code> sub-flows to spread across doesn't add throughput — measured directly, it can substantially <em>reduce</em> it while burning several times the CPU. Size this to roughly how many total sub-flows you're running across every path on this daemon, not to the core count — see <a href="#changelog-scaling">Scaling for many-core hardware</a> for the numbers behind that advice.</p>
           <div class="term">
             <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">server</span></div>
-            <pre><span class="prompt">root@joy:~#</span> glorytun bind <span class="arg">dev gt0 keyfile /etc/glorytun/gt.key from addr 0.0.0.0 port 5000 qlen 1000</span>
+            <pre><span class="prompt">root@joy:~#</span> glorytun bind <span class="arg">dev gt0 keyfile /etc/glorytun/gt.key from addr 0.0.0.0 port 5000 qlen 1000 workers 8</span>
 <span class="dim">(runs in the foreground until Ctrl+C / SIGTERM)</span></pre>
           </div>
         </div>
@@ -1188,6 +1191,70 @@ libsodium 10.3</pre>
           </div>
         </div>
       </div>
+    </section>
+
+    <section id="changelog-scaling" class="wide">
+      <h2><span class="num">§</span>What changed — a later session, scaling for many-core hardware</h2>
+      <div class="dek">Started as raising a few compile-time ceilings so <code class="inline">connections N</code> and the worker pool could actually use hardware upgraded from 4 to 32 cores. Turned into a deep, multi-day investigation of a rare stuck-sub-flow bug (root cause: a kernel-level UDP delivery anomaly, not a glorytun bug) and, from there, into discovering that the raised worker-thread ceiling itself was a real performance regression — confirmed with clean, repeated, CPU-isolated measurements on paired VMs, not simulated.</div>
+      <div class="changelog">
+        <div class="item">
+          <div class="file">mud/mud.h<br>mud/mud.c<br>src/path.c<br>src/path_manager.h<br>src/bind.c</div>
+          <div>
+            <p><strong><code class="inline">MUD_PATH_MAX</code> raised 64 → 512</strong> and <strong><code class="inline">MUD_SOCK_MAX</code> raised 256 → 4096</strong> (16×), the latter alongside widening <code class="inline">struct mud_path_conf.sock</code> from <code class="inline">unsigned char</code> to <code class="inline">uint16_t</code> everywhere it's stored (<code class="inline">mud.c</code>, <code class="inline">mud.h</code>, <code class="inline">src/path.c</code>, <code class="inline">src/path_manager.h</code>) or cast into (<code class="inline">src/bind.c</code>) — 256 was that field's own bit-width, not a deliberate design ceiling, and a deployment combining several physical links with generous <code class="inline">connections N</code> counts plus the <code class="inline">SO_REUSEPORT</code> receive-scaling reservation (next item) could plausibly approach it. <code class="inline">MUD_PATH_MAX</code> deliberately raised by a smaller multiplier than <code class="inline">MUD_SOCK_MAX</code> — every packet's path lookup linearly scans the whole array under <code class="inline">state_lock</code>, so a much larger value makes every packet slower to process, not just startup memory bigger.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">mud/mud.c</div>
+          <div>
+            <p><code class="inline">MUD_WORKERS_MAX</code> raised 8 → 32 and <code class="inline">MUD_REUSEPORT_SCALE</code> (extra <code class="inline">SO_REUSEPORT</code> listen sockets per worker, for inbound receive-scaling — see <a href="#subflows">UDP sub-flow bonding</a>) raised 8 → 16, tested directly on paired VMs at 1/8/16 against a real 16-sub-flow load: 1 → 8 gave a measured ~22% reduction in per-worker CPU spread; 8 → 16 gave nothing further at that sub-flow count, since 8 already reserved more sockets than there were real sub-flows to hash across. A new explicit clamp in <code class="inline">mud_create()</code> caps the reservation at <code class="inline">MUD_SOCK_MAX / 4</code> regardless of how either constant gets tuned later, guaranteeing at least three-quarters of the socket-index space always stays free for real <code class="inline">connections N</code> sub-flows — belt-and-suspenders for a real collision bug this same investigation hit once already (reserved sockets and a fresh <code class="inline">connections N</code> group briefly overlapping, discovered live on paired VMs).</p>
+            <p><strong>The <code class="inline">MUD_WORKERS_MAX</code> raise itself turned out to be a mistake</strong> — see the <code class="inline">workers</code> flag below, which replaces blindly trusting this constant with an operator-set value.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">mud/mud.h<br>mud/mud.c</div>
+          <div>
+            <p>New <code class="inline">mud_set_worker_count(unsigned int)</code>: overrides <code class="inline">mud_worker_count()</code>'s automatic <code class="inline">cores − 1</code> sizing with an explicit value, clamped only to the actual online core count (not to <code class="inline">MUD_WORKERS_MAX</code> — an explicit request is trusted up to what the hardware can actually run concurrently, so a future 64-core box asking for 64 workers gets 64, not capped at the old 32 ceiling). Must be called before <code class="inline">mud_create()</code>, which reads <code class="inline">mud_worker_count()</code> once to size its own <code class="inline">SO_REUSEPORT</code> pool.</p>
+            <p><strong>Why this exists:</strong> every worker thread runs the full per-packet pipeline (see <a href="#threading">Threading model</a>) but still shares one poll wakeup on the TUN device between all of them — so the <em>efficient</em> worker count tracks how many real <code class="inline">connections N</code> sub-flows are actually in use, a number only the operator configuring them knows in advance, not the raw core count <code class="inline">mud_worker_count()</code> was guessing from. Measured directly on paired 32-core VMs, holding 16 real sub-flows and a steady TCP transfer constant, changing only the worker count:</p>
+            <table class="states">
+              <tr><th>workers</th><th>throughput</th><th>daemon CPU</th></tr>
+              <tr><td><code class="inline">8</code></td><td>1.18&nbsp;Gbit/s</td><td>~4.8 cores</td></tr>
+              <tr><td><code class="inline">16</code> (= sub-flow count)</td><td>849&nbsp;Mbit/s</td><td>~10.7 cores</td></tr>
+              <tr><td><code class="inline">31</code> (old default, min(cores−1, 32))</td><td>261&nbsp;Mbit/s</td><td>~20.3 cores</td></tr>
+            </table>
+            <p>Going from the old raised default down to <code class="inline">workers 8</code> measured <strong>4.5× the throughput on well under a quarter of the CPU</strong> — not a diminishing-returns curve, an efficiency cliff, on the exact hardware this ceiling was raised for. First measured with a UDP-overload synthetic load (noisy, correctly questioned) and then reproduced cleanly with a steady, self-regulating TCP transfer and iperf3/glorytun pinned to disjoint CPU sets via <code class="inline">taskset</code> so the traffic generator couldn't be starved by the worker count under test — same direction, same order of magnitude, both times.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/bind.c</div>
+          <div>
+            <p>New <code class="inline">workers N</code> flag on <code class="inline">glorytun bind</code> (see <a href="#cmd-bind">bind</a>), calling <code class="inline">mud_set_worker_count()</code> above before <code class="inline">mud_create()</code>. Omitted, behavior is unchanged from before this session existed as an idea — automatic <code class="inline">cores − 1</code>, capped at <code class="inline">MUD_WORKERS_MAX</code> (32).</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/bind.c</div>
+          <div>
+            <p><strong>A rare (~1% per sub-flow) stuck-sub-flow bug</strong>, found stress-testing large <code class="inline">connections N</code> counts on the upgraded hardware: bringing up a big fresh batch of sub-flows at once could leave one of them permanently <span class="pill crit">degraded</span> — <code class="inline">rtt</code> stuck at 0, never self-healing despite ongoing beat retries. Root-caused over several rounds of instrumentation on paired VMs, not guessed at:</p>
+            <ol style="padding-left:1.3em;max-width:74ch">
+              <li>First hypothesis — every sub-flow's first handshake-carrying packet racing for the initial ECDH key exchange before any session key exists — led to bringing up sub-flow 0 alone first, confirming its key exchange completed (polling <code class="inline">rtt.setup</code>), <em>then</em> releasing the rest together. A first version of this fix introduced a new bug in the process: blocking the housekeeping thread in a plain <code class="inline">usleep()</code> wait loop also silently stalled <code class="inline">mud_update()</code>, which the wait was itself depending on to make progress — caught before shipping, fixed by calling <code class="inline">mud_update()</code> inside the wait loop instead of just sleeping.</li>
+              <li>That fix measurably helped but didn't eliminate the problem. Simultaneous <code class="inline">tcpdump</code> on both VMs, and instrumented tracing through <code class="inline">mud_recv_finish()</code>/<code class="inline">mud_worker_loop()</code>'s <code class="inline">poll()</code> loop, proved the real remaining cause: a stuck sub-flow's replies genuinely arrive at the receiving machine's network interface — visible on the wire, correctly addressed — but the kernel never delivers them into that specific freshly-<code class="inline">bind()</code>'d socket's receive queue, for that socket's entire remaining lifetime. Not a glorytun logic bug; a kernel/virtualized-NIC-level UDP delivery anomaly triggered by binding on the order of 100 new sockets in one uninterrupted burst.</li>
+            </ol>
+            <p>Mitigated, not eliminated, by growing the socket pool in small chunks (8 at a time, 20ms apart) instead of one bulk <code class="inline">mud_set_sock_count()</code> call for a brand-new <code class="inline">connections N &gt; 8</code> group — repeated fresh-restart <code class="inline">connections 100</code> trials went from a real chance of losing a sub-flow on nearly every attempt down to roughly 1 in 8–10, and <code class="inline">connections 32</code> or fewer showed zero failures across 45 trials (1,400+ sockets) with chunking in place.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/bind.c</div>
+          <div>
+            <p>A <code class="inline">connections N &gt; 32</code> request on a brand-new interface now logs a one-line warning naming the empirically-measured residual risk above, rather than staying silent about it — not a refusal, since the tunnel keeps running fine on the remaining sub-flows even in the rare case one gets stuck.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/path.c<br>src/show.c</div>
+          <div>
+            <p>Every <code class="inline">ip.ip.ip.ip.PORT</code>-style address in status output (path table, <code class="inline">glorytun show</code> errors, the tunnel summary) now prints standard <code class="inline">ip:port</code> notation — <code class="inline">[ip6]:port</code>, bracketed, for IPv6 — instead of the old dot-separated port, matching how a URL or <code class="inline">curl</code> already write it.</p>
+          </div>
+        </div>
+      </div>
+      <p class="note" style="font-family:var(--sans);color:var(--text-dim);font-size:0.85rem"><strong>Tested throughout on paired real VMs</strong> (client + server, restarted fresh between trials), not simulated or assumed — repeated <code class="inline">connections</code> stress runs for the stuck-sub-flow work, and CPU-isolated <code class="inline">taskset</code>-pinned throughput runs for the worker-count finding. The one thing explicitly <em>not</em> re-verified after the fact: the underlying kernel-level socket-delivery anomaly itself was characterized, not fixed — a future kernel/host/NIC-driver change could shift its exact rate without any code here changing.</p>
     </section>
 
     <section class="wide" style="margin-top:-2rem">

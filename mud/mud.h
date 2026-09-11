@@ -13,21 +13,40 @@
  * path per distinct source port it observes). struct mud_path is ~2-4KB
  * (dominated by two 60-sample struct mud_loss_track members below), so
  * this ceiling is a memory/lookup-cost tradeoff, not a hard resource
- * limit. */
-#define MUD_PATH_MAX    (64U)
+ * limit -- and unlike MUD_SOCK_MAX below, raising it isn't free: every
+ * packet's path lookup (mud_get_path()) linearly scans this whole array
+ * under state_lock, so a much larger value makes every packet slower to
+ * process, not just startup memory bigger. Raised 64 -> 512 (8x) once
+ * MUD_SOCK_MAX (below) stopped being the binding constraint on real
+ * sub-flow counts -- deliberately a smaller multiplier than that one, for
+ * exactly this per-packet-cost reason. */
+#define MUD_PATH_MAX    (512U)
 /* Local UDP sockets one mud instance may open, shared across every path --
  * not one-per-remote. Lets a single logical path be split into this many
  * independent sub-flows (distinct source ports) for bandwidth aggregation
- * on long/high-RTT links, similar to parallel TCP streams. The pool's
- * backing array is allocated once, fixed at this size, in mud_create() --
- * not grown on demand -- specifically so worker threads can read mud->sock[]
- * without synchronization (see mud_worker_loop()); 256 ints is 1KB, trivial
- * to just pre-allocate in full rather than defend against it moving. It
- * exists as a ceiling only because struct mud_path_conf.sock is a single
- * unsigned char, the actual limit on how many sockets one instance can
- * distinguish. Requests above this are rejected, not clamped, since
- * silently wrapping the index would corrupt path identity. */
-#define MUD_SOCK_MAX    (256U)
+ * on long/high-RTT links, similar to parallel TCP streams, and backs the
+ * SO_REUSEPORT receive-scaling pool mud_create() opens (see its own
+ * comment). The pool's backing array is allocated once, fixed at this
+ * size, in mud_create() -- not grown on demand -- specifically so worker
+ * threads can read mud->sock[] without synchronization (see
+ * mud_worker_loop()).
+ *
+ * Raised 256 -> 4096 (16x) alongside widening struct mud_path_conf.sock
+ * from unsigned char to uint16_t -- 256 was that field's own range, not a
+ * deliberate design ceiling, and it was already tight enough that
+ * combining several physical links with generous connections=N sub-flow
+ * counts plus the SO_REUSEPORT reservation could plausibly approach it.
+ * uint16_t comfortably covers this value with headroom to raise it
+ * further later without another type change (max 65535). Not raised
+ * further than this for now because mud_worker_loop() stack-allocates a
+ * struct pollfd plus an index per socket (~12 bytes each): at 4096 that's
+ * ~48KB against the explicit 1MB worker stack (see bind.c's
+ * pthread_attr_setstacksize()), comfortably within the ~768KB left after
+ * that stack's existing ~256KB of packet buffers, but the tradeoff would
+ * need re-examining before going much higher. Requests above this are
+ * rejected, not clamped, since silently wrapping the index would corrupt
+ * path identity. */
+#define MUD_SOCK_MAX    (4096U)
 #define MUD_PUBKEY_SIZE (32U)
 
 /* Hard wire-size ceiling: 65535 is UDP's own length-field maximum
@@ -127,11 +146,14 @@ struct mud_path_conf {
     unsigned char fixed_rate;
     unsigned char loss_limit;
     unsigned char tx_pinned;
-    unsigned char sock; /* index into the owning mud's socket pool
-                          * (0..mud_get_sock_count()-1) this path sends and
-                          * receives on -- local metadata, never sent to the
-                          * peer, meaningful for both active and passive
-                          * paths (unlike local_ifindex, never zeroed) */
+    uint16_t sock; /* index into the owning mud's socket pool
+                     * (0..mud_get_sock_count()-1) this path sends and
+                     * receives on -- local metadata, never sent to the
+                     * peer, meaningful for both active and passive
+                     * paths (unlike local_ifindex, never zeroed).
+                     * Widened from unsigned char alongside MUD_SOCK_MAX
+                     * (see its own comment) -- was that field's own
+                     * 0-255 range, not a deliberate ceiling. */
     uint64_t rtt_limit;
     uint64_t mtu; /* 0 = library default (MUD_MTU_DEFAULT); clamped to
                    * MUD_MTU_HARD_MAX regardless of what's requested -- see
@@ -253,11 +275,23 @@ int mud_recv (struct mud *, unsigned int sock, void *, size_t);
 int mud_send (struct mud *, const void *, size_t);
 
 /* How many worker threads mud_worker_loop() is meant to be run with on this
- * host: min(cores - 1, MUD_WORKERS_MAX), the same formula the transport's
- * crypto used internally before this became the caller's responsibility.
- * Just a sizing hint -- mud_worker_loop() itself doesn't care how many
- * copies of it are actually running. */
+ * host: min(cores - 1, MUD_WORKERS_MAX) by default, or whatever
+ * mud_set_worker_count() last set explicitly (see its own comment). Just a
+ * sizing hint -- mud_worker_loop() itself doesn't care how many copies of
+ * it are actually running. */
 unsigned int mud_worker_count (void);
+
+/* Overrides mud_worker_count()'s automatic cores-1 sizing with an explicit
+ * value -- every worker thread contends for the same shared TUN device
+ * wakeup (see mud_worker_loop()'s own comment), so the number of sub-flows
+ * actually in use, not raw core count, is what determines the efficient
+ * worker count; only the operator configuring `connections N` knows that
+ * number in advance. Pass 0 to go back to the automatic sizing. Clamped
+ * to [1, online core count] -- more worker threads than cores can ever
+ * run concurrently only adds contention, never throughput. Must be called
+ * before mud_create(), which reads mud_worker_count() once to size its
+ * own SO_REUSEPORT receive-scaling pool (see its own comment). */
+void mud_set_worker_count (unsigned int n);
 
 /* mud.c is a standalone transport library and deliberately knows nothing
  * about glorytun's own TUN device handling (platform-specific framing,

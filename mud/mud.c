@@ -144,17 +144,44 @@ struct mud_keyx {
     int aes;
 };
 
-#define MUD_WORKERS_MAX (8U)
+/* Ceiling on mud_worker_count() (see its own comment for the min(cores-1,
+ * this) formula). Raised 8 -> 32 (4x) to give genuinely large multi-core
+ * boxes real headroom -- previously even a 256-core machine got exactly
+ * 7 workers, identical to an 8-core one. Not raised to "however many
+ * cores exist" unconditionally: every worker thread polls the *same*
+ * shared TUN device fd (it can't be partitioned the way sockets can --
+ * see mud_worker_loop()'s own comment), so when it's readable every
+ * worker wakes to check and most find nothing -- a bigger wasted wakeup
+ * on every real packet as worker count grows, not more throughput past
+ * whatever point real per-core AEAD throughput (multi-Gbit/s, see `bench
+ * multicore`) already covers the traffic. 32 is a deliberate middle
+ * ground: a real 4x increase over the old ceiling, still well short of
+ * where that shared-fd contention would plausibly start costing more
+ * than it gives back. Also interacts with MUD_REUSEPORT_SCALE just below
+ * -- see the explicit clamp in mud_create() that keeps their product
+ * from threatening MUD_SOCK_MAX regardless of how either constant gets
+ * tuned later. */
+#define MUD_WORKERS_MAX (32U)
 
 /* How many SO_REUSEPORT sockets mud_create() opens per worker thread for
  * inbound receive scaling -- see its own comment for why one-per-worker
  * alone isn't enough once a real deployment has many more remote
- * sub-flows than local worker threads. 8 gives a 4-worker box 32 listen
- * sockets (well under MUD_SOCK_MAX even at MUD_WORKERS_MAX workers: 8x8 =
- * 64), enough bins that a realistic connections=N fan-out on the peer's
- * side spreads across them without the whole tunnel funneling through a
- * handful of sockets again. */
-#define MUD_REUSEPORT_SCALE (8U)
+ * sub-flows than local worker threads. Tested directly on paired VMs at
+ * 1, 8, and 16 against a real 16-sub-flow sustained load: 1 -> 8 gave a
+ * real, measured ~22% reduction in per-worker-thread CPU spread; 8 -> 16
+ * gave nothing further *at that same 16-sub-flow count*, since 8 already
+ * provided more reserved sockets (24, on the 3-worker box tested) than
+ * there were real sub-flows to hash across -- once bins outnumber flows,
+ * more bins stop helping. 16 is set here anyway, ahead of actually
+ * needing it: it costs one extra idle UDP socket per worker per unit of
+ * headroom (cheap), and a deployment that grows past roughly 24-32 real
+ * sub-flows -- two physical links each bonding a dozen-plus
+ * connections=N sub-flows is not exotic -- would put it back in the
+ * regime where the extra bins are earning their keep, same as 8 did over
+ * 1 at 16 real sub-flows. A 4-worker box now opens 64 listen sockets
+ * (16x4), still well under MUD_SOCK_MAX even at MUD_WORKERS_MAX workers
+ * (16x8 = 128). */
+#define MUD_REUSEPORT_SCALE (16U)
 
 /* Bounds the resequencing buffer used when mud_conf.reorder_window is
  * enabled (see mud_reorder_insert()/mud_reorder_flush() below). Fixed,
@@ -472,7 +499,7 @@ mud_mtu_apply(struct mud_path *path)
  * re-pointed once opened, only ever grown -- see mud_set_sock_count()), so
  * reading mud->sock[sock] here needs no lock either. */
 static ssize_t
-mud_sendmsg_to(struct mud *mud, unsigned char sock,
+mud_sendmsg_to(struct mud *mud, uint16_t sock,
               union mud_sockaddr *local, unsigned int local_ifindex,
               union mud_sockaddr *remote, void *data, size_t size, int flags)
 {
@@ -1058,7 +1085,22 @@ mud_create(union mud_sockaddr *addr, unsigned char *key, int *aes)
      * advance -- it's whatever connections=N the peer independently
      * chooses, possibly changed at runtime long after this socket pool is
      * created. */
-    const unsigned int want_sock = mud_worker_count() * MUD_REUSEPORT_SCALE;
+    /* Clamped to at most a quarter of MUD_SOCK_MAX, guaranteeing at least
+     * three-quarters of the socket-index space stays available for real
+     * connections=N sub-flows no matter how MUD_WORKERS_MAX or
+     * MUD_REUSEPORT_SCALE get tuned later -- both are compile-time
+     * constants today (32 and 16, a worst case of 512, well under this
+     * clamp at MUD_SOCK_MAX=4096), but this file has no way to enforce
+     * that relationship stays safe on its own if either changes down the
+     * line, and src/bind.c's connections=N fan-out (see its own
+     * base_sock comment) depends entirely on this reservation never
+     * eating the space it needs. Belt-and-suspenders for the exact class
+     * of bug this session already found and fixed once. */
+    const unsigned int want_sock_unclamped =
+        mud_worker_count() * MUD_REUSEPORT_SCALE;
+    const unsigned int want_sock = (want_sock_unclamped > MUD_SOCK_MAX / 4)
+                                  ? MUD_SOCK_MAX / 4
+                                  : want_sock_unclamped;
 
     while (mud->sock_count < want_sock) {
         int fd = socket(addr->sa.sa_family, SOCK_DGRAM, IPPROTO_UDP);
@@ -2234,9 +2276,27 @@ mud_send(struct mud *mud, const void *data, size_t size)
     return ret;
 }
 
+static unsigned int mud_worker_count_override;
+
+void
+mud_set_worker_count(unsigned int n)
+{
+    if (!n) {
+        mud_worker_count_override = 0;
+        return;
+    }
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    unsigned int max_useful = (ncpu > 1) ? (unsigned int)ncpu : 1;
+
+    mud_worker_count_override = (n > max_useful) ? max_useful : n;
+}
+
 unsigned int
 mud_worker_count(void)
 {
+    if (mud_worker_count_override)
+        return mud_worker_count_override;
+
     long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
     /* Floor of 1, not 0 -- unlike the old shared-pool design, where a
      * calling thread with no workers still processed everything itself,
@@ -2277,7 +2337,7 @@ struct mud_rx_slot {
 struct mud_tx_slot {
     unsigned char packet[MUD_PKT_MAX_SIZE];
     size_t size;
-    unsigned char sock;
+    uint16_t sock;
     union mud_sockaddr local;
     union mud_sockaddr remote;
     unsigned int local_ifindex;
@@ -2378,7 +2438,7 @@ mud_send_batch(struct mud *mud, struct mud_tx_slot *tx, unsigned int n,
         if (done[g])
             continue;
 
-        const unsigned char sock = tx[g].sock;
+        const uint16_t sock = tx[g].sock;
         unsigned int members[MUD_BATCH_MAX];
         unsigned int member_count = 0;
 
