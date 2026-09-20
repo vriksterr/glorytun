@@ -226,7 +226,17 @@ gt_path_manager_set(struct gt_path_manager *manager, struct mud *mud,
         path->desired_conf.remote = conf->remote;
         path->desired_conf.sock = sock;
         path->desired_conf.beat = 100 * 1000;
-        path->desired_conf.fixed_rate = 1;
+        /* auto-adjusting by default, matching mud_get_path()'s own default
+         * in mud.c (see its comment) -- was 1 (pinned), which combined
+         * with tx_max_rate/rx_max_rate defaulting to 0 (uncapped) to
+         * silently pin every via-interface path (the standard way to
+         * bring one up, including every `connections N` sub-flow) at
+         * zero throughput forever unless an operator explicitly gave a
+         * `rate tx`, regardless of the mud.c-level fix. gt_path_manager_
+         * apply() re-encodes this into mud_set_path()'s shifted CLI
+         * convention on every reconcile, so it was overriding the mud.c
+         * default on every single path this manager ever touched. */
+        path->desired_conf.fixed_rate = 0;
         path->desired_conf.loss_limit = 255;
     }
     gt_path_manager_update_conf(path, conf);

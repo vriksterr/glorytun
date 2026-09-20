@@ -13,6 +13,10 @@
 #include <sys/select.h>
 #include <sodium.h>
 
+#ifdef __linux__
+#include <sched.h>
+#endif
+
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0
 #endif
@@ -209,7 +213,9 @@ gt_bind(int argc, char **argv, void *data)
         gt_log("AES is not available, enjoy ChaCha20!\n");
 
     char tun_name[64];
-    const int tun_fd = tun_create(tun_name, sizeof(tun_name), dev);
+    int tun_multiqueue = 0;
+    const int tun_fd = tun_create(tun_name, sizeof(tun_name), dev,
+                                  &tun_multiqueue);
 
     if (tun_fd == -1) {
         gt_log("couldn't create tun device\n");
@@ -264,13 +270,56 @@ gt_bind(int argc, char **argv, void *data)
     pthread_t *workers = malloc(worker_count * sizeof(pthread_t));
     struct gt_worker_arg *worker_args =
         malloc(worker_count * sizeof(struct gt_worker_arg));
+    int *worker_tun_fd = malloc(worker_count * sizeof(int));
     unsigned int workers_started = 0;
 
-    if (!workers || !worker_args) {
+    if (!workers || !worker_args || !worker_tun_fd) {
         gt_log("couldn't allocate worker thread table\n");
         free(workers);
         free(worker_args);
+        free(worker_tun_fd);
         return -1;
+    }
+    /* One queue per worker instead of every worker sharing tun_fd, when
+     * the platform and this device support it (see tun_create()'s own
+     * comment) -- otherwise every worker's poll() races the others for
+     * whichever packet the kernel handed to fd 0, the same shared-fd
+     * "thundering herd" mud_worker_loop()'s own comment already describes
+     * for the case where this can't be done at all. Confirmed live on
+     * paired VMs: with a shared fd, per-core CPU during sustained load
+     * ranged from idle up to one core spiking as high as ~97% while
+     * others sat well under half that, despite each worker's own thread
+     * doing an evenly balanced share of the total work -- the imbalance
+     * was entirely about which physical core the kernel happened to
+     * schedule the "winning" reads onto, not the work itself. All-or-
+     * nothing: if any extra queue fails to open, every already-opened
+     * extra queue is closed and every worker falls back to sharing
+     * worker_tun_fd[0] (== tun_fd), rather than leaving some workers with
+     * their own queue and others without one. */
+    worker_tun_fd[0] = tun_fd;
+    int queues_ok = 1;
+
+    if (tun_multiqueue) {
+        for (unsigned int i = 1; i < worker_count; i++) {
+            worker_tun_fd[i] = tun_create_queue(tun_name);
+            if (worker_tun_fd[i] == -1 || fd_set_nonblock(worker_tun_fd[i])) {
+                gt_log("couldn't open tun queue %u: %s\n",
+                       i, strerror(errno));
+                queues_ok = 0;
+                break;
+            }
+        }
+    } else {
+        queues_ok = 0;
+    }
+    if (!queues_ok) {
+        for (unsigned int i = 1; i < worker_count; i++) {
+            if (worker_tun_fd[i] > 0 && worker_tun_fd[i] != tun_fd)
+                close(worker_tun_fd[i]);
+            worker_tun_fd[i] = tun_fd;
+        }
+    } else if (worker_count > 1) {
+        gt_log("opened %u independent tun queues\n", worker_count);
     }
     /* mud_worker_loop()'s TX/RX halves each keep a pair of
      * MUD_MTU_HARD_MAX/MUD_PKT_MAX_SIZE-sized buffers (~128KB) live on the
@@ -284,13 +333,54 @@ gt_bind(int argc, char **argv, void *data)
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 1 << 20);
 
+#ifdef __linux__
+    /* Without this, which physical core each worker's thread first lands
+     * on is whatever the scheduler feels like at that instant -- and,
+     * confirmed live on paired VMs, that initial placement then tends to
+     * stick for the thread's whole life (a continuously busy thread has
+     * little reason to migrate once running), so an unlucky roll at
+     * startup means one worker sits on a core that's structurally
+     * disadvantaged (shared with something else, worse cache locality to
+     * the NIC, whatever it is) for as long as the process runs -- not
+     * random per packet, just a coin flip locked in once per restart.
+     * Explicitly placing each worker on its own core up front removes
+     * that coin flip: every restart gets the same deterministic
+     * cores-0..N-1 layout instead of whatever the scheduler happened to
+     * pick. Built from sched_getaffinity() rather than assuming
+     * cores 0..worker_count-1 are free, so this still does something
+     * sane if the process itself is already confined to a subset (a
+     * cgroup, an outer taskset) -- spreads across whatever's actually
+     * available, wrapping if there are more workers than usable cores.
+     * Best-effort: any failure here (getaffinity, an empty set, or the
+     * setaffinity call itself) just leaves that worker on the default
+     * attr, exactly like before this existed, rather than aborting
+     * startup over a placement optimization. */
+    cpu_set_t available;
+    int have_available = !sched_getaffinity(0, sizeof(available), &available);
+    unsigned int available_count = 0;
+    int available_cpu[CPU_SETSIZE];
+
+    if (have_available) {
+        for (int c = 0; c < CPU_SETSIZE; c++)
+            if (CPU_ISSET(c, &available))
+                available_cpu[available_count++] = c;
+    }
+#endif
     for (unsigned int i = 0; i < worker_count; i++) {
         worker_args[i] = (struct gt_worker_arg){
             .mud = mud,
-            .tun_fd = tun_fd,
+            .tun_fd = worker_tun_fd[i],
             .worker_index = i,
             .worker_count = worker_count,
         };
+#ifdef __linux__
+        if (available_count) {
+            cpu_set_t one;
+            CPU_ZERO(&one);
+            CPU_SET(available_cpu[i % available_count], &one);
+            pthread_attr_setaffinity_np(&attr, sizeof(one), &one);
+        }
+#endif
         if (pthread_create(&workers[i], &attr, gt_worker_main,
                            &worker_args[i])) {
             gt_log("couldn't start worker thread %u: %s\n",
@@ -302,8 +392,12 @@ gt_bind(int argc, char **argv, void *data)
     pthread_attr_destroy(&attr);
     if (!workers_started) {
         gt_log("no worker threads could be started\n");
+        for (unsigned int i = 1; i < worker_count; i++)
+            if (worker_tun_fd[i] != tun_fd)
+                close(worker_tun_fd[i]);
         free(workers);
         free(worker_args);
+        free(worker_tun_fd);
         return -1;
     }
     if (workers_started < worker_count) {
@@ -710,8 +804,12 @@ gt_bind(int argc, char **argv, void *data)
      * dereferencing both until they actually exit. */
     for (unsigned int i = 0; i < workers_started; i++)
         pthread_join(workers[i], NULL);
+    for (unsigned int i = 1; i < worker_count; i++)
+        if (worker_tun_fd[i] != tun_fd)
+            close(worker_tun_fd[i]);
     free(workers);
     free(worker_args);
+    free(worker_tun_fd);
 
     mud_delete(mud);
     if (netlink_fd >= 0)

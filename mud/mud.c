@@ -9,6 +9,7 @@
 #include "mud.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -84,6 +85,14 @@
  * -- a conservative size safe under standard PPPoE overhead and typical
  * VPN-in-VPN encapsulation without needing to probe for it. */
 #define MUD_MTU_DEFAULT (1400U)
+
+/* Starting tx.rate (bytes/sec) for a brand-new path that has no operator-
+ * configured `rate tx` ceiling -- see mud_get_path()'s own comment for the
+ * deadlock this exists to break. ~1Mbit/s: small enough to be safe to
+ * blast onto any real link unconditionally, large enough that AIMD growth
+ * (see mud_update_rl(), ~10%/tick) reaches typical broadband speeds within
+ * a few seconds, the same order of magnitude as TCP slow start. */
+#define MUD_TX_RATE_INITIAL (125000ULL)
 
 #define MUD_CTRL_SIZE (CMSG_SPACE(MUD_PKTINFO_SIZE) + \
                        CMSG_SPACE(sizeof(struct in6_pktinfo)))
@@ -255,6 +264,16 @@ struct mud {
      * see mud_worker_loop() for the locking protocol worker threads use. */
     int sock[MUD_SOCK_MAX];
     unsigned int sock_count;
+    /* sock_count right after mud_create()'s own reserved SO_REUSEPORT pool
+     * finished growing -- i.e. the boundary between those wildcard sockets
+     * (kernel-hash-selected, shared across whichever remotes land on them)
+     * and every index past it, which is always some specific, deliberately
+     * assigned socket (either src/bind.c's own `connections N` fan-out, or
+     * mud_path_promote()'s own dedicated per-remote sockets below). Used
+     * only to decide whether a freshly-discovered passive path is eligible
+     * for promotion -- see mud_path_promote()'s own comment. Set once, past
+     * mud_create() returning; never touched again. */
+    unsigned int passive_pool_size;
     int sock_v4, sock_v6;
     sa_family_t sock_family;
     struct mud_conf conf;
@@ -693,8 +712,11 @@ mud_get_path(struct mud *mud,
              unsigned int local_ifindex,
              unsigned int sock,
              int allow_legacy,
-             enum mud_state state)
+             enum mud_state state,
+             int *created)
 {
+    if (created)
+        *created = 0;
     if (local->sa.sa_family != remote->sa.sa_family) {
         errno = EINVAL;
         return NULL;
@@ -714,12 +736,29 @@ mud_get_path(struct mud *mud,
         }
     }
     if (!local_ifindex || allow_legacy) {
+        /* Deliberately not matching on `sock` here, unlike the ifindex-
+         * based loop above -- on this passive/legacy side, the shared local
+         * port means (local address, remote address, remote port) alone
+         * already uniquely identifies a flow, so `sock` adds no real
+         * discrimination. It used to be harmless to include anyway, back
+         * when a passive path's sock never changed after creation; now
+         * that mud_path_promote() deliberately moves a path from its
+         * original reserved socket to a dedicated one, requiring sock to
+         * still match made a stray packet -- one that arrives on the old
+         * reserved socket, or on a different reserved-pool member due to a
+         * SO_REUSEPORT group-resize reshuffle mid-promotion -- fail this
+         * lookup and spawn a duplicate path for the same remote. Confirmed
+         * live: exactly this, once, during a 16-sub-flow bring-up burst.
+         * Dropping it here is safe: the active/`via IFACE` side (the loop
+         * above) is untouched, and that is the one case where `sock` is
+         * load-bearing -- a client's `connections N` sub-flows all share
+         * one remote (the server), so only the client's own differing
+         * local socket tells them apart there. */
         for (unsigned i = 0; i < mud->capacity; i++) {
             struct mud_path *path = &mud->paths[i];
 
             if (path->conf.state == MUD_EMPTY ||
                 path->conf.local_ifindex ||
-                path->conf.sock != sock ||
                 mud_cmp_addr(local, &path->conf.local) ||
                 mud_cmp_addr(remote, &path->conf.remote) ||
                 mud_cmp_port(remote, &path->conf.remote))
@@ -746,15 +785,45 @@ mud_get_path(struct mud *mud,
     }
     memset(path, 0, sizeof(struct mud_path));
 
+    if (created)
+        *created = 1;
+
     path->conf.local      = *local;
     path->conf.remote     = *remote;
     path->conf.local_ifindex = state == MUD_PASSIVE ? 0 : local_ifindex;
     path->conf.sock        = sock;
     path->conf.state      = state;
     path->conf.beat       = 100 * MUD_ONE_MSEC;
-    path->conf.fixed_rate = 1;
+    /* auto-adjusting (not pinned) by default -- an operator who explicitly
+     * wants a fixed rate says so with `rate fixed` (see src/path.c), which
+     * overwrites this via mud_set_path()'s own conf->fixed_rate handling.
+     * Was 1 (pinned): with tx_max_rate also starting at 0 (no configured
+     * ceiling, meant as "uncapped") and tx.rate seeded to that same 0
+     * below, mud_update_rl()'s AIMD growth (gated on !fixed_rate) and its
+     * observed-rate branch never ran, and its trailing ceiling clamp
+     * forced tx.rate back down to the "uncapped" tx_max_rate of 0 even on
+     * the rare tick something else set it -- a real, silent deadlock: a
+     * path with no explicit `rate tx` ever configured on either end could
+     * never carry a single real data packet (mud_select_path() skips any
+     * path with a zero select_weight, itself derived from tx.rate), while
+     * beats -- sent via a direct path reference, not mud_select_path() --
+     * kept exchanging normally, so RTT and status stayed healthy the
+     * whole time with zero visible sign that real traffic was 100% lost.
+     * Confirmed live on paired VMs: a path brought up with no `rate`
+     * flag at all dropped every single packet (ping, TCP, everything)
+     * until a rate was explicitly set. */
+    path->conf.fixed_rate = 0;
     path->conf.loss_limit = 255;
     path->status          = MUD_PROBING;
+    /* Same "0 == uncapped" deadlock applies to the rate itself: seeded
+     * here rather than left at the memset's 0 so a fresh, unconfigured
+     * path has an actual nonzero rate to advertise/select on from its
+     * very first packet, instead of needing preexisting real traffic to
+     * bootstrap a rate that real traffic itself requires to be selected
+     * in the first place. Ignored entirely for a path with an explicit
+     * `rate tx` ceiling -- mud_set_path() overwrites this with that
+     * value before any packet ever uses it. */
+    path->tx.rate          = MUD_TX_RATE_INITIAL;
     path->idle            = mud_now(mud);
 
     return path;
@@ -1115,6 +1184,7 @@ mud_create(union mud_sockaddr *addr, unsigned char *key, int *aes)
         mud->sock[mud->sock_count] = fd;
         mud->sock_count++;
     }
+    mud->passive_pool_size = mud->sock_count;
 
     mud->conf.keepalive     = 25 * MUD_ONE_SEC;
     mud->conf.timetolerance = 10 * MUD_ONE_MIN;
@@ -1595,7 +1665,12 @@ mud_update_rl(struct mud *mud, struct mud_path *path, uint64_t now,
         if (!path->conf.fixed_rate)
             path->tx.rate += path->tx.rate / 10;
     }
-    if (path->tx.rate > path->conf.tx_max_rate)
+    /* tx_max_rate == 0 means "no operator-configured ceiling", not "cap
+     * of zero" -- see mud_get_path()'s own comment for the real, silent
+     * deadlock this distinction fixes (every tick otherwise forced
+     * tx.rate straight back down to zero, permanently, for any path
+     * with no explicit `rate tx` ceiling). */
+    if (path->conf.tx_max_rate && path->tx.rate > path->conf.tx_max_rate)
         path->tx.rate = path->conf.tx_max_rate;
 }
 
@@ -1745,6 +1820,90 @@ mud_recv_msg(struct mud *mud, struct mud_path *path,
                  0);
 }
 
+/* Gives a freshly (passively) discovered remote sub-flow its own OS-level
+ * socket, connect()ed to that exact remote address, instead of leaving it
+ * sharing one of mud_create()'s wildcard SO_REUSEPORT sockets forever.
+ * Which wildcard socket a given remote's packets land on (and therefore
+ * which worker thread ends up owning all of that sub-flow's processing --
+ * see mud_worker_loop()'s `i % worker_count` partitioning) is decided by
+ * the kernel's own hash of the packet's source address/port, not by
+ * anything this program controls; with a small, fixed number of real
+ * remote sub-flows spread across that many independent worker-owned socket
+ * groups, that hash can easily leave one worker with zero real flows while
+ * another gets several -- confirmed live: an 8-worker box with 16 real
+ * sub-flows left one worker at ~0% CPU and another at ~83%, purely from
+ * hash luck (see glorytun-notes.html's scaling section).
+ *
+ * Linux's UDP socket lookup prefers an exact 4-tuple match (a fully
+ * connect()ed socket) over the reuseport hash across wildcard sockets in
+ * the same group, so once this succeeds, every future packet from this
+ * exact remote is delivered straight to the new socket -- bypassing the
+ * hash (and its imbalance) entirely, with no ongoing per-packet cost. The
+ * new socket is appended at the next sock_count index, so the existing
+ * `i % worker_count` ownership rule automatically hands each successively-
+ * discovered remote sub-flow the next worker in round-robin order -- the
+ * same guarantee src/bind.c's own `connections N` fan-out already gives
+ * the active side, now extended to the passive side's own discoveries.
+ *
+ * Best-effort and silent on failure: the path just stays on its original
+ * reserved socket, exactly as it did before this existed -- never treated
+ * as fatal. Caller must already hold state_lock (mirrors mud_get_path()'s
+ * own contract) and must only call this for a path that was *just* created
+ * via passive discovery on one of mud_create()'s own reserved sockets (see
+ * mud->passive_pool_size) -- promoting an already-dedicated `via IFACE`
+ * sub-flow socket would just waste an fd for no benefit, since those
+ * already have their own unique port and no hash-driven ambiguity to fix. */
+static void
+mud_path_promote(struct mud *mud, struct mud_path *path, unsigned int old_sock)
+{
+    if (mud->sock_count >= MUD_SOCK_MAX)
+        return;
+
+    const int old_fd = (old_sock < mud->sock_count) ? mud->sock[old_sock] : -1;
+
+    if (old_fd < 0)
+        return;
+
+    union mud_sockaddr local;
+    socklen_t local_len = sizeof(local);
+
+    memset(&local, 0, sizeof(local));
+
+    if (getsockname(old_fd, &local.sa, &local_len))
+        return;
+
+    const int fd = socket(mud->sock_family, SOCK_DGRAM, IPPROTO_UDP);
+
+    if (fd == -1)
+        return;
+
+    const socklen_t addrlen = (mud->sock_family == AF_INET)
+                             ? sizeof(struct sockaddr_in)
+                             : sizeof(struct sockaddr_in6);
+
+    if (mud_setup_socket(fd, mud->sock_v4, mud->sock_v6) ||
+        bind(fd, &local.sa, addrlen) ||
+        connect(fd, &path->conf.remote.sa, addrlen)) {
+        close(fd);
+        return;
+    }
+    /* mud_recv_batch()'s non-Linux fallback calls recvmsg() without
+     * MSG_DONTWAIT, relying entirely on O_NONBLOCK already being set on the
+     * fd (every other socket in mud->sock[] gets this from its creator --
+     * src/bind.c, right after mud_create()/mud_set_sock_count() -- since
+     * this socket is instead opened deep inside a live worker's own RX
+     * path, that same external step never gets a chance to run on it). */
+    const int flags = fcntl(fd, F_GETFL, 0);
+
+    if (flags == -1 || fcntl(fd, F_SETFL, flags | O_NONBLOCK)) {
+        close(fd);
+        return;
+    }
+    mud->sock[mud->sock_count] = fd;
+    path->conf.sock = (uint16_t)mud->sock_count;
+    mud->sock_count++;
+}
+
 /* Handles everything after a raw packet has been pulled off the wire:
  * validity/clock checks, decrypt, path lookup/creation, control-message
  * processing or idle-timestamp update, rx stat bookkeeping. Shared by
@@ -1817,13 +1976,18 @@ mud_recv_finish(struct mud *mud, unsigned int sock, struct msghdr *msg,
         pthread_mutex_unlock(&mud->state_lock);
         return 0;
     }
+    int path_created = 0;
     struct mud_path *path = mud_get_path(mud, &local, remote,
-                                         local_ifindex, sock, 1, MUD_PASSIVE);
+                                         local_ifindex, sock, 1, MUD_PASSIVE,
+                                         &path_created);
 
     if (!path || path->conf.state <= MUD_DOWN) {
         pthread_mutex_unlock(&mud->state_lock);
         return 0;
     }
+    if (path_created && sock < mud->passive_pool_size)
+        mud_path_promote(mud, path, sock);
+
     if (MUD_MSG(sent_time)) {
         mud_recv_msg(mud, path, now, sent_time, data, (size_t)packet_size);
     } else {
@@ -2147,7 +2311,8 @@ mud_set_path(struct mud *mud, struct mud_path_conf *conf)
                                               conf->local_ifindex,
                                               conf->sock,
                                               0,
-                                              conf->state);
+                                              conf->state,
+                                              NULL);
     if (!path) {
         pthread_mutex_unlock(&mud->state_lock);
         return -1;
@@ -2219,7 +2384,11 @@ mud_rebind_path(struct mud *mud, unsigned int old_ifindex,
     path->conf = conf;
     path->status = MUD_PROBING;
     path->idle = mud_now(mud);
-    path->tx.rate = conf.tx_max_rate;
+    /* 0 == uncapped, not "rate 0" -- see mud_get_path()'s own comment.
+     * Reseeds an uncapped path exactly like a brand-new one instead of
+     * silently re-triggering the same deadlock on every interface
+     * rebind (this function's whole purpose). */
+    path->tx.rate = conf.tx_max_rate ? conf.tx_max_rate : MUD_TX_RATE_INITIAL;
     path->rx.rate = conf.rx_max_rate;
     mud_mtu_apply(path);
     pthread_mutex_unlock(&mud->state_lock);
