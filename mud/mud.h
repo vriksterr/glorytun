@@ -209,6 +209,31 @@ struct mud_path {
                               * measured throughput, for display/diagnostics
                               * and for its own AIMD growth/decay. */
     uint64_t idle;
+    uint64_t created; /* mud_now() at creation, set once by mud_get_path()
+                        * and never touched again -- unlike `idle` (reused
+                        * for traffic-gap tracking once a path goes
+                        * RUNNING). mud_now() is wall-clock-based (base_time
+                        * + CLOCK_MONOTONIC, see its own comment) and so
+                        * keeps advancing across a process restart on the
+                        * same machine, not reset to 0 -- which is what lets
+                        * this double as a freshness baseline: see
+                        * `confirmed_live` just below and mud_recv_msg()'s
+                        * own comment for how the two combine. */
+    int confirmed_live; /* set (never cleared) by mud_recv_msg() the first
+                          * time this path receives a genuine reply -- one
+                          * whose echoed timestamp is >= `created` above,
+                          * meaning it can only be answering something this
+                          * process sent after this path existed, not a
+                          * queued packet a since-dead peer is still
+                          * flushing out. mud_path_promote() (see its own
+                          * comment) requires this before spending an fd on
+                          * a passively-discovered path, closing a real gap
+                          * a plain elapsed-time check left open: several
+                          * stale packets can keep trickling out of a dead
+                          * process's send queue for well over a second,
+                          * long enough to fool a timer but never able to
+                          * forge a reply to something that hadn't been
+                          * sent yet when they were queued. */
     int traffic_idle; /* no real traffic in the last second; loss_live is
                         * stale/unmeasured while this is set -- see
                         * mud_update_loss(). Refreshed every mud_update()

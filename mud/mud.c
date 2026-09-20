@@ -712,11 +712,8 @@ mud_get_path(struct mud *mud,
              unsigned int local_ifindex,
              unsigned int sock,
              int allow_legacy,
-             enum mud_state state,
-             int *created)
+             enum mud_state state)
 {
-    if (created)
-        *created = 0;
     if (local->sa.sa_family != remote->sa.sa_family) {
         errno = EINVAL;
         return NULL;
@@ -785,9 +782,6 @@ mud_get_path(struct mud *mud,
     }
     memset(path, 0, sizeof(struct mud_path));
 
-    if (created)
-        *created = 1;
-
     path->conf.local      = *local;
     path->conf.remote     = *remote;
     path->conf.local_ifindex = state == MUD_PASSIVE ? 0 : local_ifindex;
@@ -825,6 +819,7 @@ mud_get_path(struct mud *mud,
      * value before any packet ever uses it. */
     path->tx.rate          = MUD_TX_RATE_INITIAL;
     path->idle            = mud_now(mud);
+    path->created         = path->idle;
 
     return path;
 }
@@ -1707,6 +1702,19 @@ mud_recv_msg(struct mud *mud, struct mud_path *path,
         const uint64_t rx_total = MUD_LOAD_MSG(msg->rx.total);
         const uint64_t rx_time  = sent_time;
 
+        /* See `confirmed_live`'s own comment (mud.h) -- tx_time is this
+         * message's echo of an earlier outer packet timestamp *we*
+         * (mud_send_msg()) wrote using our own mud_now(), so tx_time >=
+         * created can only hold if the peer actually received and replied
+         * to something sent after this path was created on this side. A
+         * dead peer's own kernel can still flush already-queued packets
+         * for a surprisingly long time after the process exits (confirmed
+         * live, well over a second in one trial), but none of those carry
+         * a timestamp from after their sender died -- so this is immune
+         * to that, unlike a plain elapsed-time-since-creation check. */
+        if (tx_time >= path->created)
+            path->confirmed_live = 1;
+
         if ((tx_time > path->msg.tx.time) && (tx_bytes > path->msg.tx.bytes) &&
             (rx_time > path->msg.rx.time) && (rx_bytes > path->msg.rx.bytes)) {
             if (path->msg.set && path->status > MUD_PROBING) {
@@ -1848,11 +1856,32 @@ mud_recv_msg(struct mud *mud, struct mud_path *path,
  * Best-effort and silent on failure: the path just stays on its original
  * reserved socket, exactly as it did before this existed -- never treated
  * as fatal. Caller must already hold state_lock (mirrors mud_get_path()'s
- * own contract) and must only call this for a path that was *just* created
- * via passive discovery on one of mud_create()'s own reserved sockets (see
- * mud->passive_pool_size) -- promoting an already-dedicated `via IFACE`
- * sub-flow socket would just waste an fd for no benefit, since those
- * already have their own unique port and no hash-driven ambiguity to fix. */
+ * own contract) and must only call this for a path still on one of
+ * mud_create()'s own reserved sockets (see mud->passive_pool_size) --
+ * promoting an already-dedicated `via IFACE` sub-flow socket would just
+ * waste an fd for no benefit, since those already have their own unique
+ * port and no hash-driven ambiguity to fix.
+ *
+ * Deliberately called from mud_path_update() (the housekeeping thread's
+ * once-per-tick sweep, see mud_update()) once a passive path first proves
+ * genuine two-way liveness (reaches this function's own `return 1`, i.e.
+ * status settles at MUD_READY or MUD_RUNNING), not from mud_recv_finish()
+ * on the very first packet. mud->sock[] is append-only by design (see
+ * struct mud's own comment: a worker thread's already-read fd can never be
+ * invalidated by another thread resizing the array underneath it), so
+ * nothing ever closes a promoted socket even after mud_path_update()'s own
+ * 5-minute idle reap clears the *path* it belonged to -- promoting on
+ * first sight, as this used to, meant a single decrypt-successful stray
+ * packet (a peer restarted from a killed process with packets still
+ * in-flight, a scan, anything that never develops into a real
+ * conversation) permanently leaked one fd for the life of the process,
+ * bounded only by MUD_PATH_MAX. A one-off packet's path never reaches
+ * status better than MUD_WAITING once any other real traffic is flowing
+ * (mud_path_update()'s own MUD_PASSIVE-waiting check trips within a few
+ * beat intervals, well before the 5-minute reap), so gating promotion on
+ * genuine liveness here means a fd is only ever spent on a flow that's
+ * actually going to use it. Confirmed live: the exact ghost-path/leaked-fd
+ * scenario above, reproduced with a killed-and-restarted peer. */
 static void
 mud_path_promote(struct mud *mud, struct mud_path *path, unsigned int old_sock)
 {
@@ -1891,8 +1920,8 @@ mud_path_promote(struct mud *mud, struct mud_path *path, unsigned int old_sock)
      * MSG_DONTWAIT, relying entirely on O_NONBLOCK already being set on the
      * fd (every other socket in mud->sock[] gets this from its creator --
      * src/bind.c, right after mud_create()/mud_set_sock_count() -- since
-     * this socket is instead opened deep inside a live worker's own RX
-     * path, that same external step never gets a chance to run on it). */
+     * this socket is instead opened deep inside the housekeeping thread's
+     * own tick, that same external step never gets a chance to run on it). */
     const int flags = fcntl(fd, F_GETFL, 0);
 
     if (flags == -1 || fcntl(fd, F_SETFL, flags | O_NONBLOCK)) {
@@ -1976,17 +2005,13 @@ mud_recv_finish(struct mud *mud, unsigned int sock, struct msghdr *msg,
         pthread_mutex_unlock(&mud->state_lock);
         return 0;
     }
-    int path_created = 0;
     struct mud_path *path = mud_get_path(mud, &local, remote,
-                                         local_ifindex, sock, 1, MUD_PASSIVE,
-                                         &path_created);
+                                         local_ifindex, sock, 1, MUD_PASSIVE);
 
     if (!path || path->conf.state <= MUD_DOWN) {
         pthread_mutex_unlock(&mud->state_lock);
         return 0;
     }
-    if (path_created && sock < mud->passive_pool_size)
-        mud_path_promote(mud, path, sock);
 
     if (MUD_MSG(sent_time)) {
         mud_recv_msg(mud, path, now, sent_time, data, (size_t)packet_size);
@@ -2084,6 +2109,39 @@ mud_path_update(struct mud *mud, struct mud_path *path, uint64_t now)
         path->status = MUD_RUNNING;
         path->idle = now;
     }
+    /* Reaching here means this path passed every liveness check above --
+     * but that alone does NOT prove it's a real, ongoing conversation
+     * rather than a one-off stray packet: the MUD_PASSIVE waiting-check
+     * just above only trips once `mud->last_recv_time` has pulled ahead of
+     * *this* path's own rx.time by a beat-scaled margin, and a path's
+     * rx.time is (by construction) always freshly set at creation -- so on
+     * the very first tick after any path is created, that gap is
+     * necessarily still ~0, and every fresh path, ghost or genuine, sails
+     * through to here regardless.
+     *
+     * An earlier version of this gate additionally required a fixed
+     * multiple of that same beat-scaled margin to have elapsed since
+     * creation, reasoning that a one-off path would fail the waiting-check
+     * well before such a margin passed. Confirmed live that this is NOT
+     * reliable: a killed process's kernel can keep flushing already-queued
+     * packets for well over a second (a real trial measured a steady
+     * trickle spanning ~20s), which keeps refreshing rx.time often enough
+     * to dodge the waiting-check for as long as the trickle lasts,
+     * defeating any fixed elapsed-time margin.
+     *
+     * `confirmed_live` (see its own comment, and mud_recv_msg()'s) is the
+     * actual fix: it can only be set by a genuine reply whose echoed
+     * timestamp is >= this path's own creation time, which a dead
+     * process's queued packets can never produce regardless of how long
+     * or how densely they keep trickling out, since none of them can carry
+     * a timestamp from after their sender stopped running. A live peer
+     * satisfies this within one real round trip (typically single-digit
+     * milliseconds), so this is also strictly faster than the elapsed-time
+     * version was for the common, genuine case. */
+    if (path->conf.state == MUD_PASSIVE &&
+        path->conf.sock < mud->passive_pool_size &&
+        path->confirmed_live)
+        mud_path_promote(mud, path, path->conf.sock);
     return 1;
 }
 
@@ -2311,8 +2369,7 @@ mud_set_path(struct mud *mud, struct mud_path_conf *conf)
                                               conf->local_ifindex,
                                               conf->sock,
                                               0,
-                                              conf->state,
-                                              NULL);
+                                              conf->state);
     if (!path) {
         pthread_mutex_unlock(&mud->state_lock);
         return -1;
