@@ -17,6 +17,10 @@
 #include <pthread.h>
 #include <poll.h>
 
+#if defined __linux__
+#include <sched.h>
+#endif
+
 #include <sys/ioctl.h>
 #include <sys/time.h>
 
@@ -171,6 +175,14 @@ struct mud_keyx {
  * from threatening MUD_SOCK_MAX regardless of how either constant gets
  * tuned later. */
 #define MUD_WORKERS_MAX (32U)
+
+/* Ceiling for an *explicit* mud_set_worker_count(), which may exceed the
+ * number of usable cores (an operator confined to a few cores can still ask
+ * for more workers than cores, so sub-flows divide evenly across them --
+ * 16 paths over 3 workers is 6/5/5, over 8 workers is 2 each, and the
+ * scheduler balances the threads). 64 keeps mud_create()'s receive pool
+ * (workers x MUD_REUSEPORT_SCALE) exactly at its MUD_SOCK_MAX/4 clamp. */
+#define MUD_WORKERS_EXPLICIT_MAX (64U)
 
 /* How many SO_REUSEPORT sockets mud_create() opens per worker thread for
  * inbound receive scaling -- see its own comment for why one-per-worker
@@ -1098,7 +1110,7 @@ mud_create(union mud_sockaddr *addr, unsigned char *key, int *aes)
      * the getsockname() above to the concrete resolved port (needed for
      * the common "bind to port 0, let the OS pick one" case) rather than
      * whatever the caller originally requested. Best-effort and capped by
-     * mud_worker_count() (at most MUD_WORKERS_MAX, well under
+     * mud_worker_count() (at most MUD_WORKERS_EXPLICIT_MAX, well under
      * MUD_SOCK_MAX): if SO_REUSEPORT isn't available on this platform, or
      * opening an additional socket fails for any reason, this simply
      * keeps whatever it already has rather than failing tunnel creation
@@ -2504,6 +2516,30 @@ mud_send(struct mud *mud, const void *data, size_t size)
 
 static unsigned int mud_worker_count_override;
 
+/* Cores this process may actually run on: its CPU affinity mask on Linux
+ * (so a `cpus` restriction, taskset, a cgroup or systemd CPUAffinity= are
+ * all respected), else the online core count. */
+static unsigned int
+mud_usable_cores(void)
+{
+#if defined __linux__
+    cpu_set_t set;
+
+    if (!sched_getaffinity(0, sizeof(set), &set)) {
+        unsigned int n = 0;
+
+        for (int c = 0; c < CPU_SETSIZE; c++)
+            if (CPU_ISSET(c, &set))
+                n++;
+        if (n)
+            return n;
+    }
+#endif
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+
+    return (ncpu > 1) ? (unsigned int)ncpu : 1;
+}
+
 void
 mud_set_worker_count(unsigned int n)
 {
@@ -2511,8 +2547,10 @@ mud_set_worker_count(unsigned int n)
         mud_worker_count_override = 0;
         return;
     }
-    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
-    unsigned int max_useful = (ncpu > 1) ? (unsigned int)ncpu : 1;
+    unsigned int max_useful = 4 * mud_usable_cores();
+
+    if (max_useful > MUD_WORKERS_EXPLICIT_MAX)
+        max_useful = MUD_WORKERS_EXPLICIT_MAX;
 
     mud_worker_count_override = (n > max_useful) ? max_useful : n;
 }
@@ -2523,12 +2561,14 @@ mud_worker_count(void)
     if (mud_worker_count_override)
         return mud_worker_count_override;
 
-    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    const unsigned int cores = mud_usable_cores();
     /* Floor of 1, not 0 -- unlike the old shared-pool design, where a
      * calling thread with no workers still processed everything itself,
      * here the worker threads are the only thing that ever processes a
-     * packet, so a single-core box still needs exactly one. */
-    unsigned want = (ncpu > 1) ? (unsigned)(ncpu - 1) : 1;
+     * packet, so a single-core box still needs exactly one. Sized from the
+     * cores this process may use, not the machine's -- otherwise a process
+     * confined to 3 of 32 cores would default to 31 workers. */
+    unsigned want = (cores > 1) ? cores - 1 : 1;
 
     if (want > MUD_WORKERS_MAX)
         want = MUD_WORKERS_MAX;

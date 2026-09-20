@@ -300,7 +300,9 @@ int mud_recv (struct mud *, unsigned int sock, void *, size_t);
 int mud_send (struct mud *, const void *, size_t);
 
 /* How many worker threads mud_worker_loop() is meant to be run with on this
- * host: min(cores - 1, MUD_WORKERS_MAX) by default, or whatever
+ * host: min(usable cores - 1, MUD_WORKERS_MAX) by default ("usable" = the
+ * cores this process is allowed to run on, so a CPU restriction is
+ * respected), or whatever
  * mud_set_worker_count() last set explicitly (see its own comment). Just a
  * sizing hint -- mud_worker_loop() itself doesn't care how many copies of
  * it are actually running. */
@@ -312,8 +314,11 @@ unsigned int mud_worker_count (void);
  * actually in use, not raw core count, is what determines the efficient
  * worker count; only the operator configuring `connections N` knows that
  * number in advance. Pass 0 to go back to the automatic sizing. Clamped
- * to [1, online core count] -- more worker threads than cores can ever
- * run concurrently only adds contention, never throughput. Must be called
+ * to [1, min(4 x usable cores, 64)] -- deliberately allowed to exceed the
+ * core count, since more workers than cores lets sub-flows divide evenly
+ * (16 paths over 3 workers is 6/5/5, over 8 is 2 each) while the scheduler
+ * spreads the threads; call after any CPU restriction is in place, since
+ * the ceiling is computed from the cores available at that moment. Must be called
  * before mud_create(), which reads mud_worker_count() once to size its
  * own SO_REUSEPORT receive-scaling pool (see its own comment). */
 void mud_set_worker_count (unsigned int n);

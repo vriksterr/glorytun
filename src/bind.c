@@ -10,12 +10,11 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
-#include <sys/select.h>
-#include <sodium.h>
-
 #ifdef __linux__
 #include <sched.h>
 #endif
+#include <sys/select.h>
+#include <sodium.h>
 
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0
@@ -132,6 +131,59 @@ struct gt_worker_arg {
     unsigned int worker_count;
 };
 
+#ifdef __linux__
+/* Parses a core list like "0-2" or "0,2,4-5" into `out`. Every listed core
+ * must be one this process may currently run on -- a typo or an offline core
+ * is an error, not something to drop quietly, since the point of the option
+ * is keeping glorytun off specific cores. Returns how many cores were
+ * selected, or -1 on any problem. */
+static int
+gt_parse_cpus(const char *s, cpu_set_t *out)
+{
+    cpu_set_t allowed;
+    int count = 0;
+
+    CPU_ZERO(out);
+    if (sched_getaffinity(0, sizeof(allowed), &allowed))
+        return -1;
+
+    while (*s) {
+        char *end;
+        unsigned long a = strtoul(s, &end, 10);
+        unsigned long b = a;
+
+        if (end == s)
+            return -1;
+        if (*end == '-') {
+            s = end + 1;
+            b = strtoul(s, &end, 10);
+            if (end == s)
+                return -1;
+        }
+        if (b < a || b >= CPU_SETSIZE)
+            return -1;
+
+        for (unsigned long c = a; c <= b; c++) {
+            if (!CPU_ISSET(c, &allowed)) {
+                gt_log("cpu core %lu is not available to this process\n", c);
+                return -1;
+            }
+            if (!CPU_ISSET(c, out)) {
+                CPU_SET(c, out);
+                count++;
+            }
+        }
+        if (*end == ',')
+            s = end + 1;
+        else if (*end)
+            return -1;
+        else
+            s = end;
+    }
+    return count;
+}
+#endif
+
 static void *
 gt_worker_main(void *arg)
 {
@@ -146,6 +198,7 @@ int
 gt_bind(int argc, char **argv, void *data)
 {
     const char *dev = NULL;
+    const char *cpus = NULL;
     struct argz_path keyfile = {0};
     struct gt_argz_addr local = {
         .sock.sin = {
@@ -168,6 +221,9 @@ gt_bind(int argc, char **argv, void *data)
                                                         argz_ull,   &qlen},
         {"workers", "Number of worker threads (default: cores minus one)",
                                                         argz_ull,   &workers_arg},
+        {"cpus",    "Only use these CPU cores, e.g. 0-2 or 0,2 (Linux only; "
+                    "default workers: one per core listed)",
+                                                        argz_str,      &cpus},
         {0}};
 
     int err = argz(argc, argv, z);
@@ -191,6 +247,35 @@ gt_bind(int argc, char **argv, void *data)
     if (gt_read_keyfile(key, keyfile.path))
         return -1;
 
+    if (cpus) {
+#ifdef __linux__
+        /* Applied to this thread before any other thread exists, so every
+         * worker and the housekeeping loop inherit it. It confines the whole
+         * process to the listed cores and leaves placement inside that set
+         * to the scheduler -- not one-thread-per-core pinning, which pegged
+         * whichever worker landed on the core taking the NIC's interrupts.
+         * Must come before mud_set_worker_count() below: that call's ceiling
+         * and the default worker count both follow the cores available. */
+        cpu_set_t set;
+        const int n = gt_parse_cpus(cpus, &set);
+
+        if (n <= 0) {
+            gt_log("invalid cpus '%s' (expected e.g. 0-2 or 0,2)\n", cpus);
+            return -1;
+        }
+        if (sched_setaffinity(0, sizeof(set), &set)) {
+            gt_log("couldn't restrict to cpus '%s': %s\n", cpus,
+                   strerror(errno));
+            return -1;
+        }
+        if (!argz_is_set(z, "workers"))
+            mud_set_worker_count((unsigned int)n);
+        gt_log("restricted to %d cpu core(s): %s\n", n, cpus);
+#else
+        gt_log("the cpus option is only supported on Linux\n");
+        return -1;
+#endif
+    }
     if (argz_is_set(z, "workers"))
         mud_set_worker_count((unsigned int)workers_arg.value);
 
@@ -333,50 +418,12 @@ gt_bind(int argc, char **argv, void *data)
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 1 << 20);
 
-#ifdef __linux__
-    /* Without this, which physical core each worker's thread first lands
-     * on is whatever the scheduler feels like at that instant -- and,
-     * confirmed live on paired VMs, that initial placement then tends to
-     * stick for the thread's whole life (a continuously busy thread has
-     * little reason to migrate once running), so an unlucky roll at
-     * startup means one worker sits on a core that's structurally
-     * disadvantaged (shared with something else, worse cache locality to
-     * the NIC, whatever it is) for as long as the process runs -- not
-     * random per packet, just a coin flip locked in once per restart.
-     * Explicitly placing each worker on its own core up front removes
-     * that coin flip: every restart gets the same deterministic
-     * cores-0..N-1 layout instead of whatever the scheduler happened to
-     * pick. Built from sched_getaffinity() rather than assuming
-     * cores 0..worker_count-1 are free, so this still does something
-     * sane if the process itself is already confined to a subset (a
-     * cgroup, an outer taskset) -- spreads across whatever's actually
-     * available, wrapping if there are more workers than usable cores.
-     * Best-effort: any failure here (getaffinity, an empty set, or the
-     * setaffinity call itself) just leaves that worker wherever the
-     * scheduler put it, exactly like before this existed, rather than
-     * aborting startup over a placement optimization.
-     *
-     * Applied via pthread_setaffinity_np() on the thread handle right
-     * after pthread_create() returns, not pthread_attr_setaffinity_np()
-     * on the attr beforehand -- musl (as used by OpenWrt, see the stack
-     * size comment just above) never implemented the attr-based version
-     * at all, so building against it fails outright there rather than
-     * merely degrading; the post-creation call is the one both glibc and
-     * musl actually provide. A thread briefly running unpinned between
-     * its own pthread_create() and this call is harmless: nothing here
-     * depends on placement being in effect before the thread's first
-     * instruction, only before it settles into steady-state polling. */
-    cpu_set_t available;
-    int have_available = !sched_getaffinity(0, sizeof(available), &available);
-    unsigned int available_count = 0;
-    int available_cpu[CPU_SETSIZE];
-
-    if (have_available) {
-        for (int c = 0; c < CPU_SETSIZE; c++)
-            if (CPU_ISSET(c, &available))
-                available_cpu[available_count++] = c;
-    }
-#endif
+    /* Worker threads are deliberately NOT pinned to cores. An earlier
+     * version pinned worker i to core i; on small boxes (4-5 cores, the
+     * common router/VPS case) that put one worker on core 0, which also
+     * takes the NIC's softirq load, so that core hit ~100% while the
+     * others sat at 65-70% and the last core idled. The scheduler moves
+     * workers off the interrupt-heavy core by itself. */
     for (unsigned int i = 0; i < worker_count; i++) {
         worker_args[i] = (struct gt_worker_arg){
             .mud = mud,
@@ -390,14 +437,6 @@ gt_bind(int argc, char **argv, void *data)
                    i, strerror(errno));
             break;
         }
-#ifdef __linux__
-        if (available_count) {
-            cpu_set_t one;
-            CPU_ZERO(&one);
-            CPU_SET(available_cpu[i % available_count], &one);
-            pthread_setaffinity_np(workers[i], sizeof(one), &one);
-        }
-#endif
         workers_started++;
     }
     pthread_attr_destroy(&attr);
