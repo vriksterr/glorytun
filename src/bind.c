@@ -352,9 +352,20 @@ gt_bind(int argc, char **argv, void *data)
      * cgroup, an outer taskset) -- spreads across whatever's actually
      * available, wrapping if there are more workers than usable cores.
      * Best-effort: any failure here (getaffinity, an empty set, or the
-     * setaffinity call itself) just leaves that worker on the default
-     * attr, exactly like before this existed, rather than aborting
-     * startup over a placement optimization. */
+     * setaffinity call itself) just leaves that worker wherever the
+     * scheduler put it, exactly like before this existed, rather than
+     * aborting startup over a placement optimization.
+     *
+     * Applied via pthread_setaffinity_np() on the thread handle right
+     * after pthread_create() returns, not pthread_attr_setaffinity_np()
+     * on the attr beforehand -- musl (as used by OpenWrt, see the stack
+     * size comment just above) never implemented the attr-based version
+     * at all, so building against it fails outright there rather than
+     * merely degrading; the post-creation call is the one both glibc and
+     * musl actually provide. A thread briefly running unpinned between
+     * its own pthread_create() and this call is harmless: nothing here
+     * depends on placement being in effect before the thread's first
+     * instruction, only before it settles into steady-state polling. */
     cpu_set_t available;
     int have_available = !sched_getaffinity(0, sizeof(available), &available);
     unsigned int available_count = 0;
@@ -373,20 +384,20 @@ gt_bind(int argc, char **argv, void *data)
             .worker_index = i,
             .worker_count = worker_count,
         };
-#ifdef __linux__
-        if (available_count) {
-            cpu_set_t one;
-            CPU_ZERO(&one);
-            CPU_SET(available_cpu[i % available_count], &one);
-            pthread_attr_setaffinity_np(&attr, sizeof(one), &one);
-        }
-#endif
         if (pthread_create(&workers[i], &attr, gt_worker_main,
                            &worker_args[i])) {
             gt_log("couldn't start worker thread %u: %s\n",
                    i, strerror(errno));
             break;
         }
+#ifdef __linux__
+        if (available_count) {
+            cpu_set_t one;
+            CPU_ZERO(&one);
+            CPU_SET(available_cpu[i % available_count], &one);
+            pthread_setaffinity_np(workers[i], sizeof(one), &one);
+        }
+#endif
         workers_started++;
     }
     pthread_attr_destroy(&attr);
