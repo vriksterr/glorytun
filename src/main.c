@@ -77,6 +77,12 @@ gt_print_commands(struct argz *z)
             gt_help_line("bind qlen",
                         "Set the tun device's tx queue length, e.g. "
                         "bind qlen 1000 (default is the kernel's own)");
+            gt_help_line("bind workers",
+                        "Number of worker threads, e.g. bind workers 8 "
+                        "(default: cores minus one; may exceed the core count)");
+            gt_help_line("bind cpus",
+                        "Only use these CPU cores, e.g. bind cpus 0-2 or "
+                        "0,2 (Linux only; default workers: one per core listed)");
         } else if (!strcmp(z[i].name, "path")) {
             gt_help_line("path watch",
                         "Live-refresh path status every second");

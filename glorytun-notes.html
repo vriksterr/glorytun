@@ -511,6 +511,7 @@
       <li><a href="#changelog-subflows">Sub-flow bonding</a></li>
       <li><a href="#changelog-reorder">Packet resequencing</a></li>
       <li><a href="#changelog-scaling">Scaling for many-core hardware</a></li>
+      <li><a href="#changelog-cores">Core placement &amp; interrupts</a></li>
     </ul>
   </nav>
 
@@ -560,7 +561,7 @@
         </div>
       </div>
       <p>Total participating threads on an <em>n</em>-core box is exactly <em>n</em> (capped at 9) — <em>n</em>−1 spawned workers plus the main thread, never <em>n</em>+1, which would oversubscribe the CPU for no benefit. See <code class="inline">bench multicore</code> below for a way to actually measure what this design costs in practice.</p>
-      <p class="note" style="font-family:var(--sans);color:var(--text-dim);font-size:0.88rem"><strong>Superseded by a later session:</strong> each worker now runs the <em>entire</em> per-packet pipeline itself (TUN read, encrypt/decrypt, path lookup, send) instead of only crypto — there's no separate main-thread-does-everything-else design anymore, and the cap moved from 8 to 32, with the count now operator-settable. See <a href="#changelog-scaling">Scaling for many-core hardware</a> for the current model and why the raised default alone turned out to be a real performance regression.</p>
+      <p class="note" style="font-family:var(--sans);color:var(--text-dim);font-size:0.88rem"><strong>Superseded by a later session:</strong> each worker now runs the <em>entire</em> per-packet pipeline itself (TUN read, encrypt/decrypt, path lookup, send) instead of only crypto — there's no separate main-thread-does-everything-else design anymore, and the cap moved from 8 to 32, with the count now operator-settable. See <a href="#changelog-scaling">Scaling for many-core hardware</a> for the current model and why the raised default alone turned out to be a real performance regression. <strong>Later still:</strong> each worker also has its own TUN queue, and the process can be confined to chosen cores — see <a href="#changelog-cores">Core placement &amp; interrupts</a>. The always-present extra thread is now purely housekeeping (path tick, control socket, network events), not a packet worker.</p>
     </section>
 
     <section id="health">
@@ -801,17 +802,22 @@ set dev gt0 kxtimeout 1h timetolerance 10m keepalive 25s reorderwindow 20ms</pre
     <section id="cmd-bind">
       <div class="cmd">
         <div class="cmd-head">
-          <code>glorytun bind [dev NAME] [addr LOCAL_IP [PORT]] keyfile FILE [persist] [chacha] [qlen N] [workers N]</code>
-          <span class="tag new">workers is new</span>
+          <code>glorytun bind [dev NAME] [addr LOCAL_IP [PORT]] keyfile FILE [persist] [chacha] [qlen N] [workers N] [cpus LIST]</code>
+          <span class="tag new">workers, cpus are new</span>
         </div>
         <div class="cmd-body">
           <p>Starts the tunnel: creates/attaches the TUN device (on Linux, attaches to a pre-existing device of that name if one exists), opens the UDP socket, and runs the event loop until stopped. Runs in the foreground.</p>
           <p><code class="inline">persist</code> keeps the Linux TUN device alive when the process exits — useful with <code class="inline">via</code>-bound paths so netifd doesn't flap the interface across a crash/respawn. <code class="inline">chacha</code> forces the ChaCha20-Poly1305 fallback instead of negotiating AEGIS-256. <code class="inline">qlen</code> sets the TUN device's tx queue length (<code class="inline">txqueuelen</code>) once at startup — Linux defaults TUN/TAP interfaces to 500 (vs. 1000 for a typical Ethernet interface); raise it if real bulk traffic through the tunnel could burst past that. Unlike <code class="inline">mtu</code> on <code class="inline">path up</code>, this is a one-time value applied once when the interface is created, not something that needs to keep tracking path config afterward.</p>
-          <p><code class="inline">workers</code> sets exactly how many worker threads to run, overriding the automatic <code class="inline">cores − 1</code> default. Every worker thread shares one poll wakeup on the TUN device (see <a href="#threading">Threading model</a>), so more of them than you have real <code class="inline">connections N</code> sub-flows to spread across doesn't add throughput — measured directly, it can substantially <em>reduce</em> it while burning several times the CPU. Size this to roughly how many total sub-flows you're running across every path on this daemon, not to the core count — see <a href="#changelog-scaling">Scaling for many-core hardware</a> for the numbers behind that advice.</p>
+          <p><code class="inline">workers</code> sets exactly how many worker threads to run, overriding the automatic default of <em>usable cores</em> − 1 (usable = the cores this process is allowed to run on, so a <code class="inline">cpus</code> limit, <code class="inline">taskset</code> or systemd <code class="inline">CPUAffinity=</code> is respected). <code class="inline">workers 8</code> gives exactly 8 workers, not 7 — the "minus one" applies only to the automatic default. A separate housekeeping thread (the original main thread: the ~100&nbsp;ms path tick, the control socket, network-change events) always runs in addition, using well under 1% of a core. The value is capped at 4 × usable cores, at most 64, so asking for more workers than cores is allowed. Historical note: when every worker shared one poll wakeup on the TUN device, more workers than real <code class="inline">connections N</code> sub-flows measurably <em>reduced</em> throughput (numbers in <a href="#changelog-scaling">Scaling for many-core hardware</a>). Workers now each read their own TUN queue, and on a 3-core limit 8 workers ran as fast as 3 within run-to-run noise (<a href="#changelog-cores">Core placement &amp; interrupts</a>). What still matters is that your path count divides evenly by the worker count: 16 paths over 3 workers is 6/5/5, so one worker carries about 20% more; over 8 workers it is 2 each.</p>
+          <p><code class="inline">cpus</code> confines the whole process — every worker and the housekeeping thread — to the listed cores, e.g. <code class="inline">cpus 0-2</code> or <code class="inline">cpus 0,2</code>, and leaves placement <em>inside</em> that set to the scheduler (it does not pin one worker per core). Its purpose is to keep glorytun off the core that services the network card's interrupts, which otherwise ends up pegged at ~100% while the others idle (see <a href="#changelog-cores">Core placement &amp; interrupts</a>). A core that doesn't exist or isn't available is an error and glorytun refuses to start (exit 255, no tunnel device created); Linux only. Given without <code class="inline">workers</code>, the default is one worker per listed core. Equivalent to <code class="inline">taskset -c</code> or <code class="inline">CPUAffinity=</code>, but part of the command line and it works where <code class="inline">taskset</code> isn't installed.</p>
           <div class="term">
             <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">server</span></div>
             <pre><span class="prompt">root@joy:~#</span> glorytun bind <span class="arg">dev gt0 keyfile /etc/glorytun/gt.key from addr 0.0.0.0 port 5000 qlen 1000 workers 8</span>
-<span class="dim">(runs in the foreground until Ctrl+C / SIGTERM)</span></pre>
+<span class="dim">(runs in the foreground until Ctrl+C / SIGTERM)</span>
+
+<span class="prompt">root@atlas:~#</span> glorytun bind <span class="arg">dev gt1 keyfile /root/gt.key from addr 0.0.0.0 port 0 to addr 203.0.113.9 port 443 cpus 0-2 workers 8</span>
+<span class="dim">restricted to 3 cpu core(s): 0-2
+opened 8 independent tun queues</span></pre>
           </div>
         </div>
       </div>
@@ -991,6 +997,8 @@ libsodium 10.3</pre>
   bench multicore fallback   Same, using the ChaCha20 fallback cipher
   bind                       Start a new tunnel
   bind qlen                  Set the tun device's tx queue length, e.g. bind qlen 1000 (default is the kernel's own)
+  bind workers               Number of worker threads, e.g. bind workers 8 (default: cores minus one; may exceed the core count)
+  bind cpus                  Only use these CPU cores, e.g. bind cpus 0-2 or 0,2 (Linux only; default workers: one per core listed)
   set                        Change tunnel properties
   keygen                     Generate a new secret key
   path                       Manage paths
@@ -1213,7 +1221,7 @@ libsodium 10.3</pre>
         <div class="item">
           <div class="file">mud/mud.h<br>mud/mud.c</div>
           <div>
-            <p>New <code class="inline">mud_set_worker_count(unsigned int)</code>: overrides <code class="inline">mud_worker_count()</code>'s automatic <code class="inline">cores − 1</code> sizing with an explicit value, clamped only to the actual online core count (not to <code class="inline">MUD_WORKERS_MAX</code> — an explicit request is trusted up to what the hardware can actually run concurrently, so a future 64-core box asking for 64 workers gets 64, not capped at the old 32 ceiling). Must be called before <code class="inline">mud_create()</code>, which reads <code class="inline">mud_worker_count()</code> once to size its own <code class="inline">SO_REUSEPORT</code> pool.</p>
+            <p>New <code class="inline">mud_set_worker_count(unsigned int)</code>: overrides <code class="inline">mud_worker_count()</code>'s automatic <code class="inline">cores − 1</code> sizing with an explicit value, clamped only to the actual online core count (not to <code class="inline">MUD_WORKERS_MAX</code> — an explicit request is trusted up to what the hardware can actually run concurrently, so a future 64-core box asking for 64 workers gets 64, not capped at the old 32 ceiling). <em>Superseded: the clamp is now 4 × the cores this process may use, at most 64 — see <a href="#changelog-cores">Core placement &amp; interrupts</a>.</em> Must be called before <code class="inline">mud_create()</code>, which reads <code class="inline">mud_worker_count()</code> once to size its own <code class="inline">SO_REUSEPORT</code> pool.</p>
             <p><strong>Why this exists:</strong> every worker thread runs the full per-packet pipeline (see <a href="#threading">Threading model</a>) but still shares one poll wakeup on the TUN device between all of them — so the <em>efficient</em> worker count tracks how many real <code class="inline">connections N</code> sub-flows are actually in use, a number only the operator configuring them knows in advance, not the raw core count <code class="inline">mud_worker_count()</code> was guessing from. Measured directly on paired 32-core VMs, holding 16 real sub-flows and a steady TCP transfer constant, changing only the worker count:</p>
             <table class="states">
               <tr><th>workers</th><th>throughput</th><th>daemon CPU</th></tr>
@@ -1255,6 +1263,223 @@ libsodium 10.3</pre>
         </div>
       </div>
       <p class="note" style="font-family:var(--sans);color:var(--text-dim);font-size:0.85rem"><strong>Tested throughout on paired real VMs</strong> (client + server, restarted fresh between trials), not simulated or assumed — repeated <code class="inline">connections</code> stress runs for the stuck-sub-flow work, and CPU-isolated <code class="inline">taskset</code>-pinned throughput runs for the worker-count finding. The one thing explicitly <em>not</em> re-verified after the fact: the underlying kernel-level socket-delivery anomaly itself was characterized, not fixed — a future kernel/host/NIC-driver change could shift its exact rate without any code here changing.</p>
+    </section>
+
+    <section id="changelog-cores" class="wide">
+      <h2><span class="num">§</span>What changed — a later session, core placement, interrupts and worker sizing</h2>
+      <div class="dek">Started as a report that one core sat at ~100% on a 4-core Raspberry Pi router while the others idled, even though the same code balanced cleanly on 32-core test VMs. Along the way: two real bugs on the receive side (an uneven worker split caused by the kernel's socket hash, and a socket leak that the first fix for it introduced), a CPU-pinning feature that turned out to <em>be</em> the pegged core and had to be removed, and the actual answer — the network card's interrupts land on one core and glorytun should stay off it. Measured on paired VMs shrunk to the router's core counts, plus a strictly read-only look at the real router.</div>
+      <div class="changelog">
+        <div class="item">
+          <div class="file">src/tun.c<br>src/tun.h<br>src/bind.c</div>
+          <div>
+            <p><strong>One TUN queue per worker.</strong> On Linux the TUN device is created multi-queue (<code class="inline">IFF_MULTI_QUEUE</code>) and each extra worker opens its own queue with the new <code class="inline">tun_create_queue()</code>, instead of every worker polling one shared TUN fd. All-or-nothing: if any extra queue fails to open, all workers fall back to the single shared fd. Startup logs <code class="inline">opened N independent tun queues</code>. The kernel picks the queue per flow (hash), so one inner flow always uses one queue. The older statement that every worker shares one poll wakeup on the TUN device (Threading model, Scaling) describes the design before this change.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">mud/mud.c<br>src/path_manager.c</div>
+          <div>
+            <p><strong>A path with no <code class="inline">rate</code> configured could never carry a data packet.</strong> Three things combined: <code class="inline">fixed_rate</code> defaulted to 1 (pinned), <code class="inline">tx.rate</code> was seeded at 0, and the clamp in <code class="inline">mud_update_rl()</code> treated "no ceiling" (<code class="inline">tx_max_rate</code> 0) as a ceiling of zero. Beats are sent by direct path reference, so RTT and status stayed healthy while every ping and TCP segment was silently dropped. The default existed twice — in <code class="inline">mud_get_path()</code> and in <code class="inline">gt_path_manager_set()</code>, which re-encodes its own copy on every reconcile and so overrode the first for every <code class="inline">via IFACE</code> path — and both had to change. Now auto-adjusting by default, seeded at <code class="inline">MUD_TX_RATE_INITIAL</code> (125,000 bytes/s, about 1&nbsp;Mbit/s), with 0 meaning uncapped in the clamp. Confirmed on a fresh tunnel with no <code class="inline">rate</code> flag: 0% loss and the rate ramps.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">mud/mud.c</div>
+          <div>
+            <p><strong>Server-side sub-flows get a dedicated socket, assigned in order.</strong> The passive side opens workers × 16 <code class="inline">SO_REUSEPORT</code> sockets on one port, and the kernel's hash of the remote address picks which one a new sub-flow lands on. A worker owns sockets by <code class="inline">index % worker_count</code>, so which worker served a flow was decided by hash luck. Measured on 8 workers and 16 real flows: one worker got none (0.03% CPU) and another got six (83%), confirmed by mapping each flow's socket index mod 8 on the server, with CPU pinning ruled out as the cause (below). With fewer workers per flow the chance is smaller (4 workers over 16 flows came out 4/4/4/4) but never zero.</p>
+            <p>Fix: <code class="inline">mud_path_promote()</code> opens a fresh socket on the same local port, <code class="inline">connect()</code>ed to that exact remote, appended at the next <code class="inline">sock_count</code> index. Linux delivers to an exact-match connected socket before the reuseport hash, and appending in order makes <code class="inline">index % worker_count</code> a strict round-robin — the guarantee the client side already had for <code class="inline">connections N</code>. Result on 32-core VMs, 8 workers, 16 streams, 2.3&nbsp;Gbit/s: two flows per worker, workers at 53–55% each.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">mud/mud.c<br>mud/mud.h</div>
+          <div>
+            <p><strong>Only promote a path that has proved it is alive.</strong> Promoting on the first packet leaked file descriptors: <code class="inline">mud-&gt;sock[]</code> is append-only by design (a worker reads a slot without a lock, so closing or reusing one would be a use-after-close race), and the 5-minute idle reap clears the <em>path</em> but never its socket. A killed peer's kernel can keep flushing already-queued packets for a long time (a steady trickle spanning about 20&nbsp;s was captured), each one decrypting fine under the pre-shared key, so every such ghost cost one fd permanently, bounded only by <code class="inline">MUD_PATH_MAX</code>.</p>
+            <p>A first fix — wait a few beat intervals before promoting — was measured <em>not</em> to work: a fresh path always passes the waiting check on its first tick, and a trickle keeps refreshing it. The fix that holds: new fields <code class="inline">created</code> and <code class="inline">confirmed_live</code>; <code class="inline">mud_recv_msg()</code> sets <code class="inline">confirmed_live</code> only when a reply's echoed timestamp is ≥ <code class="inline">created</code>. <code class="inline">mud_now()</code> is wall-clock based (<code class="inline">base_time</code> + <code class="inline">CLOCK_MONOTONIC</code>) and keeps advancing across a process restart, and a dead process cannot echo a timestamp from after it died, however long its queue keeps draining. Promotion (from <code class="inline">mud_path_update()</code>, the housekeeping tick) requires it.</p>
+            <p>Deterministic test: a firewall rule on the client dropped the server's replies. The server's path stayed on its shared socket (index 69), <span class="pill crit">degraded</span>, rtt 0.000, for as long as the rule stood. With the rule removed, the next completed round trip promoted it to index 144, <span class="pill ok">running</span>, rtt 0.347&nbsp;ms. Real flows are promoted within one round trip.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">mud/mud.c</div>
+          <div>
+            <p><strong>The passive-path lookup no longer matches on <code class="inline">sock</code>.</strong> On the shared port, (local address, remote address, remote port) already identifies a flow. Now that promotion moves a path between sockets, requiring the match let a stray packet arriving on the old socket create a duplicate path for one live flow (seen once in a 16-flow bring-up). The active <code class="inline">via IFACE</code> lookup is untouched: there a client's <code class="inline">connections N</code> sub-flows all share one remote (the server) and the local socket is the only thing telling them apart.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/bind.c</div>
+          <div>
+            <p><strong>Worker CPU pinning — added, then removed.</strong> Pinning worker <em>i</em> to core <em>i</em> was added while chasing the uneven server split above and did nothing for it (worker 4 stayed at 0.03% with its own exclusive core), which is how scheduling was ruled out. On small machines it was actively harmful: on 5-core and 4-core VMs, and on the real router, worker 0 sat on core 0 — the core that also services the network card's interrupts — so that core hit 96% (36% of it softirq) while its worker ran at 86% against 64–72% for the others, and the last core idled. On the 32-core VMs, a direct back-to-back comparison gave 1.71–1.87&nbsp;Gbit/s unpinned against 1.31–1.36 pinned. Removed. It was also the cause of the OpenWrt build failing: it used <code class="inline">pthread_attr_setaffinity_np()</code>, a glibc extension musl does not have.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/bind.c<br>mud/mud.c<br>mud/mud.h</div>
+          <div>
+            <p><strong><code class="inline">cpus LIST</code> and worker sizing.</strong> <code class="inline">bind cpus 0-2</code> (ranges and lists) confines the whole process to those cores with one <code class="inline">sched_setaffinity()</code> call on the main thread before any other thread exists, so every worker and the housekeeping thread inherit it; the scheduler still places threads freely inside the set. <code class="inline">sched_setaffinity</code> exists on both glibc and musl. An unavailable core or malformed list is refused. Alongside it: the default worker count is now (cores this process may use) − 1 instead of (online cores) − 1, so a process confined to 3 of 32 cores no longer defaults to 31 workers; given <code class="inline">cpus</code> alone, the default is one worker per listed core; and an explicit <code class="inline">workers</code> is capped at 4 × usable cores, at most <code class="inline">MUD_WORKERS_EXPLICIT_MAX</code> (64, which keeps the receive-socket pool exactly at its <code class="inline">MUD_SOCK_MAX / 4</code> clamp). The extra housekeeping thread runs inside the same core set, using 0.1–0.4% of a core in every measurement.</p>
+            <p>Tested on both 4- and 5-core VMs: <code class="inline">cpus 0-2</code> → 3 workers, every thread on cores 0–2; <code class="inline">cpus 0-2 workers 8</code> → 8; <code class="inline">workers 100</code> → capped at 12; <code class="inline">cpus 1,3</code> → 2 workers on cores 1 and 3; under <code class="inline">taskset -c 0-2</code> with no option → 2 workers; <code class="inline">cpus 9</code>, <code class="inline">abc</code>, <code class="inline">2-1</code>, <code class="inline">0-</code>, <code class="inline">0,,1</code> all refused with exit 255 and no tunnel device created.</p>
+          </div>
+        </div>
+        <div class="item">
+          <div class="file">src/main.c</div>
+          <div>
+            <p>The bare <code class="inline">glorytun</code> listing now shows <code class="inline">bind workers</code> and <code class="inline">bind cpus</code> next to <code class="inline">bind qlen</code> (see <a href="#cmd-toplevel">listing</a>).</p>
+          </div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:2rem;font-size:1.05rem">Why one core gets pegged</h3>
+      <p style="max-width:74ch">The kernel does the receive-side work for the network card on a small number of cores, and a glorytun worker sharing one of them can't get away from it. Each virtual NIC on the test VMs has a single receive queue with all its interrupts on one core (about 35% softirq on the server's core 0, 29% on the client's core 3); the router is the same story with USB adapters. That core is busy with work glorytun doesn't control, and any worker on it becomes the bottleneck. Two further measurements: turning on receive packet steering (RPS, <code class="inline">rps_cpus</code>) flattened the client (per-core busy from 24–87% to 43–71%) but barely helped the server, whose interrupt core still takes the interrupt itself; and the client's leftover 77% vs 68% worker skew was purely arithmetic — 16 paths over 3 workers is 6/5/5, and 77/68 is that same ratio.</p>
+
+      <h3 style="margin-top:2rem;font-size:1.05rem">What the Raspberry Pi router actually looks like</h3>
+      <p style="max-width:74ch">Inspected read-only (nothing changed on the live machine): Raspberry Pi 5, 4 cores, OpenWrt 25.12, kernel 6.12.</p>
+      <table class="states">
+        <tr><th>fact</th><th>what was found</th></tr>
+        <tr><td>NICs</td><td><code class="inline">eth1</code> (LAN trunk with many VLANs) and <code class="inline">eth2</code> are USB Ethernet adapters, on two different xHCI USB controllers. The built-in <code class="inline">eth0</code> is down. Each adapter has one rx and one tx queue.</td></tr>
+        <tr><td>The two WANs</td><td>Both ISPs are PPPoE over VLANs of <code class="inline">eth2</code> (<code class="inline">eth2.2</code>, <code class="inline">eth2.3</code>). They share one physical adapter, so <em>a WAN does not get its own core</em>; VLANs and PPPoE share their parent's interrupts.</td></tr>
+        <tr><td>Interrupts</td><td>The two controllers' interrupts (<code class="inline">xhci-hcd:usb1</code>, ~45&nbsp;M, and <code class="inline">xhci-hcd:usb3</code>, ~48&nbsp;M) fired only on core 0.</td></tr>
+        <tr><td>Live load, 5&nbsp;s</td><td>core 0: 49% softirq + 40% system, 4% idle; core 1: 48% idle; core 2: 41% idle; core 3: 71% idle.</td></tr>
+        <tr><td>Steering</td><td>OpenWrt's packet steering is on: <code class="inline">rps_cpus</code> sends <code class="inline">eth1</code>'s protocol processing to core 2 and <code class="inline">eth2</code>'s to core 3. <code class="inline">irqbalance</code> is not running.</td></tr>
+        <tr><td>glorytun</td><td>Running <code class="inline">workers 3</code> from an older build that pinned workers to cores 0, 1, 2: the worker on core 0 was at 66% while core 0 was at 96%.</td></tr>
+      </table>
+      <p style="max-width:74ch">Two things that shaped the design. <code class="inline">/proc/irq/N/effective_affinity_list</code> is <em>empty</em> on this hardware, so "read which core the kernel assigned" would have silently found nothing. And the interrupts are named after the USB controller (<code class="inline">xhci-hcd:usbN</code>), not the interface, so mapping an interface to its interrupt means walking from the interface's sysfs device up to its <code class="inline">xhci-hcd.N</code> controller. An automatic "detect the interrupt core and stay off it" feature was designed (measure per-core irq + softirq time from <code class="inline">/proc/stat</code>, which works everywhere, and exclude only cores that are really busy with it) but deliberately <strong>not built</strong>: the explicit <code class="inline">cpus</code> option plus the boot script below cover it without guessing, and a wrong guess is what pinning did.</p>
+
+      <h3 style="margin-top:2rem;font-size:1.05rem">Measured on VMs shrunk to 4 and 5 cores</h3>
+      <p style="max-width:74ch">Core counts matched to the real machines by taking the rest offline through sysfs; 16 streams (<code class="inline">iperf3 -P 16</code>), 16 paths, 4-core client and 5-core server.</p>
+      <table class="states">
+        <tr><th>setup</th><th>throughput</th><th>pegged core</th></tr>
+        <tr><td>original build (pinned workers)</td><td>1.16&nbsp;Gbit/s</td><td>yes: 96% / 80%</td></tr>
+        <tr><td>pinning removed</td><td>1.21–1.24&nbsp;Gbit/s</td><td>interrupt core only</td></tr>
+        <tr><td>+ interrupts moved to the last core, glorytun on the rest</td><td>1.74–1.95&nbsp;Gbit/s (+44% over 1.21)</td><td>none: glorytun cores level, interrupt core busy with softirq only</td></tr>
+      </table>
+      <p style="max-width:74ch">In the last row the server's four workers sat at 82–84% each on cores 0–3 with the interrupt core at 67% (54% of it softirq), and the client's three glorytun cores at 68–72% with the interrupt core at 31%.</p>
+      <p style="max-width:74ch"><strong>More workers than cores</strong>, client confined with <code class="inline">cpus 0-2</code>, 16 paths:</p>
+      <table class="states">
+        <tr><th>workers</th><th>throughput, 3 runs</th><th>per-worker CPU</th></tr>
+        <tr><td><code class="inline">3</code> (paths split 6/5/5)</td><td>1.95, 1.74, 1.76&nbsp;Gbit/s</td><td>77%, 69%, 69%</td></tr>
+        <tr><td><code class="inline">8</code> (2 paths each)</td><td>1.86, 1.73, 1.79&nbsp;Gbit/s</td><td>27.6–28.4% each</td></tr>
+      </table>
+      <p style="max-width:74ch">Throughput is the same within run-to-run noise; 8 workers just make the per-worker load even.</p>
+
+      <h3 style="margin-top:2rem;font-size:1.05rem">Keeping glorytun off the interrupt core — a boot script</h3>
+      <p style="max-width:74ch">Kept out of the source tree (it is system configuration, not glorytun). It moves a named interface's interrupts to a core you choose; run it at boot, then give glorytun the other cores with <code class="inline">cpus</code>. Plain POSIX sh, so the same file works on OpenWrt (busybox ash) and Debian/Ubuntu. It finds the interrupts three ways: PCI/virtio MSI-X vectors, the xHCI controller behind a USB NIC, and interrupts named after the interface. Tested on a virtual NIC (the interrupts moved and only the target core's counter grew under traffic) and against a replica of the Pi's real directory layout (only <code class="inline">eth2</code>'s interrupt moves, <code class="inline">eth1</code>'s and the built-in port's do not). <strong>Not run on the real router</strong> — see below.</p>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">nic-irq-affinity.sh</span></div>
+        <pre>#!/bin/sh
+# nic-irq-affinity.sh -- put a network interface's interrupts on the CPU core(s)
+# you choose, so glorytun can be kept on the OTHER cores. Plain POSIX sh.
+#   nic-irq-affinity.sh start     move the interrupts (run this at boot)
+#   nic-irq-affinity.sh status    show where they are now and whether they fire
+NICS="${NICS:-eth2}"          # interface(s) whose interrupts to move
+IRQ_CPUS="${IRQ_CPUS:-3}"     # target core(s). Several ("2 3") = spread round-robin
+WAIT="${WAIT:-60}"            # seconds to wait for the interface to appear at boot
+SYS="${SYS:-/sys}"            # only overridden by tests
+PROC="${PROC:-/proc}"
+
+log() { echo "nic-irq-affinity: $*"; logger -t nic-irq-affinity "$*" 2&gt;/dev/null; }
+
+# Print the IRQ numbers that serve interface $1, one per line.
+irqs_of() {
+    nic=$1
+    dev=$(readlink -f "$SYS/class/net/$nic/device" 2&gt;/dev/null) || return 0
+
+    # PCI and virtio NICs: MSI-X vectors (virtio's PCI device is a parent of the net device)
+    d=$dev
+    for _ in 1 2 3 4; do
+        if [ -d "$d/msi_irqs" ]; then ls "$d/msi_irqs"; break; fi
+        d=$(dirname "$d")
+    done
+
+    # USB NICs (e.g. Raspberry Pi): the interrupt belongs to the USB host controller
+    # (xhci-hcd.N), and /proc/interrupts names it after that controller's first bus.
+    case $dev in
+    */xhci-hcd.*/usb[0-9]*)
+        ctrl=${dev%%/usb[0-9]*}
+        for bus in $(ls "$ctrl" 2&gt;/dev/null | grep '^usb[0-9]'); do
+            grep "xhci-hcd:$bus\$" "$PROC/interrupts" | cut -d: -f1 | tr -d ' '
+        done ;;
+    esac
+
+    # Drivers that name their interrupts after the interface (eth0-TxRx-0, ens18-input.0, ...)
+    grep -w "$nic" "$PROC/interrupts" 2&gt;/dev/null | cut -d: -f1 | tr -d ' '
+}
+
+all_irqs() {
+    for nic in $NICS; do irqs_of "$nic"; done | grep '^[0-9][0-9]*$' | sort -un
+}
+
+wait_for_nics() {
+    t=0
+    for nic in $NICS; do
+        while [ ! -e "$SYS/class/net/$nic" ] &amp;&amp; [ "$t" -lt "$WAIT" ]; do sleep 1; t=$((t + 1)); done
+        [ -e "$SYS/class/net/$nic" ] || log "interface $nic did not appear within ${WAIT}s"
+    done
+}
+
+do_start() {
+    wait_for_nics
+    irqs=$(all_irqs)
+    if [ -z "$irqs" ]; then
+        log "found no interrupts for: $NICS (nothing changed)"
+        return 1
+    fi
+    if command -v pidof &gt;/dev/null 2&gt;&amp;1 &amp;&amp; pidof irqbalance &gt;/dev/null 2&gt;&amp;1; then
+        log "WARNING: irqbalance is running and may move these interrupts back"
+    fi
+    set -- $IRQ_CPUS
+    n=$#
+    i=0
+    for irq in $irqs; do
+        eval "cpu=\${$((i % n + 1))}"
+        i=$((i + 1))
+        if echo "$cpu" &gt; "$PROC/irq/$irq/smp_affinity_list" 2&gt;/dev/null; then
+            now=$(cat "$PROC/irq/$irq/smp_affinity_list" 2&gt;/dev/null)
+            if [ "$now" = "$cpu" ]; then
+                log "irq $irq -&gt; core $cpu"
+            else
+                log "irq $irq: asked for core $cpu, kernel now reports '$now'"
+            fi
+        else
+            log "irq $irq: the kernel refused to move it (this hardware may not allow it); left as is"
+        fi
+    done
+}
+
+do_status() {
+    echo "core columns below are per-core interrupt counts; the growing column is the one in use"
+    head -1 "$PROC/interrupts"
+    for irq in $(all_irqs); do
+        grep "^ *$irq:" "$PROC/interrupts"
+        echo "    ^ irq $irq allowed cores: $(cat "$PROC/irq/$irq/smp_affinity_list" 2&gt;/dev/null)"
+    done
+}
+
+case "${1:-start}" in
+    start)  do_start ;;
+    status) do_status ;;
+    *)      echo "usage: $0 [start|status]"; exit 2 ;;
+esac</pre>
+      </div>
+      <p style="max-width:74ch"><code class="inline">IRQ_CPUS</code> is the core (or cores) to move the interrupts onto. One number puts every interrupt of the interface there; several numbers hand a multi-queue card's interrupts out in turn, round-robin. Use a single core unless one interrupt core becomes the ceiling.</p>
+      <p style="max-width:74ch"><strong>OpenWrt</strong> — put it before glorytun starts in <code class="inline">rc.local</code> (it runs after all init scripts, so a USB adapter already exists), <code class="inline">chmod +x</code> it, and give glorytun the other cores. After a reboot, <code class="inline">logread | grep nic-irq</code> shows the move, and <code class="inline">nic-irq-affinity.sh status</code> under load shows whether the target core's counter grows:</p>
+      <div class="term">
+        <pre>NICS="eth2" IRQ_CPUS="3" /root/Software/Scripts/nic-irq-affinity.sh start
+glorytun bind dev gt1 ... cpus 0-2 workers 8 &amp;</pre>
+      </div>
+      <p style="max-width:74ch"><strong>systemd (a VPS)</strong> — the same script, run as a oneshot before glorytun, plus <code class="inline">CPUAffinity=</code> on the glorytun unit (or <code class="inline">cpus</code>); disable <code class="inline">irqbalance</code>, which would move the interrupts back. Use the real interface name and reserve the highest core:</p>
+      <div class="term">
+        <pre># /etc/systemd/system/nic-irq-affinity.service
+[Unit]
+Description=Move NIC interrupts to a dedicated core
+After=network-online.target
+Before=glorytun.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=NICS=eth0 IRQ_CPUS=3
+ExecStart=/usr/local/sbin/nic-irq-affinity.sh start
+[Install]
+WantedBy=multi-user.target
+
+# in glorytun.service:   After=nic-irq-affinity.service   CPUAffinity=0-2</pre>
+      </div>
+
+      <p class="note" style="font-family:var(--sans);color:var(--text-dim);font-size:0.85rem"><strong>Not verified, and worth checking first:</strong> (1) whether the Pi lets these USB interrupts be moved at all — they come through the RP1 chip's interrupt controller, and the affinity file can accept a value while the interrupt keeps firing on core 0. The script logs what the kernel reports, but only <code class="inline">status</code> under real traffic (target core's counter growing) proves it; if it doesn't move, keep the interrupt on core 0 and confine glorytun to the other cores instead (<code class="inline">cpus 1-3</code>). (2) The OpenWrt/musl build of this source has not been run; <code class="inline">sched_setaffinity</code> and the <code class="inline">CPU_*</code> macros exist on musl and an earlier build there already compiled the read-side <code class="inline">sched_getaffinity</code>. (3) OpenWrt's own packet steering still sends <code class="inline">eth1</code>'s protocol processing to core 2, one of the glorytun cores; it was left alone here and may need adjusting. The router keeps running the older pinned build until it is rebuilt and reinstalled.</p>
     </section>
 
     <section class="wide" style="margin-top:-2rem">
