@@ -2100,8 +2100,35 @@ mud_recv_msg(struct mud *mud, struct mud_path *path,
         if (tx_time >= path->created)
             path->confirmed_live = 1;
 
+        /* tx_total/rx_total (packet counts, used below only for the tx-loss
+         * delta fed to mud_update_rl()) must also be checked here, not just
+         * tx_bytes/rx_bytes -- confirmed live in production: they are NOT
+         * guaranteed to move together. tx_total in particular arrives via
+         * an echo (msg->fw.total, the peer's own re-transmission of an
+         * earlier tx.total we told it) rather than directly, one extra
+         * round trip removed from tx_bytes -- and control messages ride
+         * the same per-packet-striped paths as data (see "Packet
+         * resequencing" earlier in glorytun-notes.html), so they are
+         * exactly as subject to arriving out of send order. A message
+         * whose echoed tx_total is momentarily behind what's already been
+         * recorded, while tx_bytes/tx_time/rx_bytes/rx_time all still
+         * happen to look forward-moving, used to pass this guard anyway --
+         * and every field below is unsigned, so `tx_total -
+         * path->msg.tx.total` doesn't go negative, it wraps to a number
+         * near UINT64_MAX. Fed into mud_update_rl() as this path's "sent"
+         * count against a real, small "received" count, that reads as
+         * ~100% loss for one window, sitting in the rolling tracker until
+         * it ages out ~60 seconds later -- confirmed live: multiple
+         * sub-flows, and both group figures pooling them, spiking to
+         * ~99% loss for minutes at a time in production despite the
+         * tunnel otherwise working normally throughout. The rx-loss check
+         * elsewhere in this function already guards both of its own two
+         * fields (peer_tx_total and peer_tx_bytes) for exactly this
+         * reason; this one only ever checked one of its two. */
         if ((tx_time > path->msg.tx.time) && (tx_bytes > path->msg.tx.bytes) &&
-            (rx_time > path->msg.rx.time) && (rx_bytes > path->msg.rx.bytes)) {
+            (tx_total > path->msg.tx.total) &&
+            (rx_time > path->msg.rx.time) && (rx_bytes > path->msg.rx.bytes) &&
+            (rx_total > path->msg.rx.total)) {
             if (path->msg.set && path->status > MUD_PROBING) {
                 mud_update_rl(mud, path, now,
                         MUD_TIME_MASK(tx_time - path->msg.tx.time),
