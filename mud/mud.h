@@ -205,11 +205,24 @@ struct mud_path {
             uint64_t time;
         } tx, rx;
         struct mud_loss_track tx_loss;
+        uint64_t tx_seen; /* this side's own mud_now() the last time a
+                            * message advanced every one of tx/rx
+                            * time/bytes at once (see mud_recv_msg()) --
+                            * i.e. the last time tx.loss had anything fresh
+                            * to compute from. Own clock, unlike msg.tx.time
+                            * just above (the peer's echoed send time) --
+                            * this is what mud_path_track() times a stuck
+                            * sub-flow's own reports against, independent of
+                            * traffic_idle (which tracks real data only, not
+                            * whether *this path's* status reports
+                            * specifically keep arriving). */
         struct {
             uint64_t peer_total;
             uint64_t peer_bytes;
             uint64_t own_total;
-            uint64_t time;
+            uint64_t time; /* this side's own mud_now() the last time a
+                             * fresh peer tx report arrived -- same
+                             * function as tx_seen above, for rx.loss. */
         } rxloss;
         struct mud_loss_track rx_loss;
         uint64_t time;
@@ -218,6 +231,33 @@ struct mud_path {
     } msg;
     size_t mtu; /* the fixed wire size this path sends at -- always set (see
                  * mud_mtu_apply()), no discovery/negotiation involved */
+    /* Pooled across every path sharing this one's physical link (same
+     * definition of "group" as select_weight above: same interface/local
+     * address and remote address) -- recomputed once per mud_update() tick,
+     * identical value mirrored onto every member. Exists because tx.loss/
+     * rx.loss above, and their live counterparts, only update when a
+     * message from the peer on that *exact* sub-flow successfully arrives;
+     * on a genuinely lossy link a sub-flow's own status reports are subject
+     * to the same loss being measured, so a single sub-flow can go stale
+     * for an unbounded stretch even while carrying real traffic (confirmed
+     * live: one sub-flow observed frozen for 25+ consecutive seconds while
+     * its physical-link siblings kept updating every second). Pooling
+     * raw sent/received counts across every sub-flow before computing one
+     * ratio -- never averaging the already-computed per-path percentages,
+     * which would just average in whatever stale value a stuck sub-flow
+     * happened to be sitting on -- means the group figure only goes quiet
+     * if every single sub-flow of the link stops reporting at once, far
+     * less likely than any one of them doing so alone. Drives loss_limit/
+     * MUD_LOSSY at the group level too: see mud_path_update(). */
+    uint64_t group_tx_loss, group_rx_loss;
+    uint64_t group_tx_loss_live, group_rx_loss_live;
+    uint64_t group_rtt; /* average rtt.val across every currently-RUNNING
+                          * member of the group -- same rationale as the loss
+                          * figures above, applied to latency: one path's own
+                          * RTT reading is only as fresh as its own last
+                          * successful exchange, while the group figure
+                          * reflects whichever member(s) most recently heard
+                          * back. */
     uint64_t select_weight; /* recomputed once per mud_update() tick, used by
                               * mud_select_path() instead of tx.rate directly:
                               * equal to the average tx.rate across every

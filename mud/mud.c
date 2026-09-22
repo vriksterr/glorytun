@@ -379,6 +379,40 @@ struct mud_reorder {
                                  * mud_reorder_flush() */
 };
 
+/* Pooled loss/RTT state for every path sharing one physical link -- see
+ * struct mud_path's group_tx_loss/group_rx_loss/group_rtt fields (mud.h) for
+ * the full rationale. Identity fields mirror mud_path_same_group()'s own
+ * comparison exactly (see mud_group_get()), snapshotted once when the group
+ * is first created rather than read live off some "representative" member
+ * path -- so the group's identity, and the rolling loss trackers below it,
+ * survive regardless of which specific member paths come and go over the
+ * tunnel's lifetime. Found/created via linear scan (mud_group_get()): the
+ * number of distinct physical links on one tunnel is small (a handful at
+ * most -- this is bounded by real WAN interfaces, not by connections N or
+ * sub-flow count), so this costs nothing next to the O(paths^2)
+ * select_weight computation this file already does every tick. */
+struct mud_group {
+    int active;
+    unsigned int local_ifindex;
+    union mud_sockaddr local;
+    union mud_sockaddr remote;
+    struct mud_loss_track tx_loss, rx_loss; /* fed by mud_recv_msg(), one
+                                 * event per successful message from ANY
+                                 * member path -- never touched by a stuck
+                                 * member's silence, only ever advanced by
+                                 * whichever member(s) actually report */
+    uint64_t tx_loss_pub, rx_loss_pub;           /* rolling, 0-255 scale,
+                                 * same meaning/scale as struct mud_path's
+                                 * own tx.loss/rx.loss */
+    uint64_t tx_loss_live_pub, rx_loss_live_pub; /* most recently closed 1s
+                                 * bucket, pooled the same way */
+    /* Transient: reset and recomputed from scratch every mud_update() tick
+     * (see the group pass there), not meaningful between ticks the way the
+     * rolling trackers above are. */
+    uint64_t rtt_sum;
+    unsigned rtt_count;
+};
+
 struct mud {
     /* Fixed-size, allocated as part of this struct rather than grown with
      * realloc() -- so a pointer/index a worker thread is using can never be
@@ -404,6 +438,12 @@ struct mud {
     sa_family_t sock_family;
     struct mud_conf conf;
     struct mud_path paths[MUD_PATH_MAX];
+    struct mud_group groups[MUD_PATH_MAX]; /* worst case one group per path
+                                 * (every path its own physical link); a
+                                 * real deployment has only a handful of
+                                 * distinct WAN interfaces, so almost all of
+                                 * this stays !active. See struct mud_group's
+                                 * own comment. */
     unsigned pref;
     unsigned capacity;
     struct mud_keyx keyx;
@@ -798,6 +838,49 @@ mud_path_same_group(struct mud_path *a, struct mud_path *b)
         return 0;
     }
     return !mud_cmp_addr(&a->conf.remote, &b->conf.remote);
+}
+
+/* Finds this path's struct mud_group (see its own comment), creating one in
+ * the first free slot if this is the first path seen with this identity.
+ * Same grouping rule as mud_path_same_group() just above, applied against
+ * the group's own stored identity rather than another path's live one, so a
+ * group outlives any single member path coming or going. Returns NULL only
+ * if every one of MUD_PATH_MAX slots is already a distinct active group --
+ * unreachable in practice (that many distinct physical links on one tunnel
+ * is not a real deployment), but callers still treat it as "no group
+ * tracking for this path right now" rather than assuming success. Always
+ * called with state_lock already held, same as mud_path_same_group()'s own
+ * callers. */
+static struct mud_group *
+mud_group_get(struct mud *mud, struct mud_path *path)
+{
+    struct mud_group *free_slot = NULL;
+
+    for (unsigned i = 0; i < MUD_PATH_MAX; i++) {
+        struct mud_group *grp = &mud->groups[i];
+
+        if (!grp->active) {
+            if (!free_slot)
+                free_slot = grp;
+            continue;
+        }
+        if (path->conf.local_ifindex || grp->local_ifindex) {
+            if (path->conf.local_ifindex != grp->local_ifindex)
+                continue;
+        } else if (mud_cmp_addr(&path->conf.local, &grp->local)) {
+            continue;
+        }
+        if (!mud_cmp_addr(&path->conf.remote, &grp->remote))
+            return grp;
+    }
+    if (!free_slot)
+        return NULL;
+
+    free_slot->active = 1;
+    free_slot->local_ifindex = path->conf.local_ifindex;
+    free_slot->local = path->conf.local;
+    free_slot->remote = path->conf.remote;
+    return free_slot;
 }
 
 int
@@ -1906,6 +1989,22 @@ mud_update_rl(struct mud *mud, struct mud_path *path, uint64_t now,
                         &path->tx.loss, &path->tx.loss_live,
                         tx_pkt, rx_pkt);
 
+        /* Same event, same deltas, also folded into this path's physical-
+         * link group (see struct mud_group's own comment) -- fed here
+         * rather than duplicating mud_update_rl()'s own gating logic
+         * elsewhere. idle=0: this call only happens because a fresh message
+         * just arrived, which is itself proof the group isn't idle this
+         * instant; the group's own idle-aging (mirroring what
+         * mud_path_track() already does per path) is handled once per tick
+         * in mud_update() instead, from a fresher, tick-level view of every
+         * member at once. */
+        struct mud_group *grp = mud_group_get(mud, path);
+
+        if (grp)
+            mud_update_loss(&grp->tx_loss, now, 0,
+                            &grp->tx_loss_pub, &grp->tx_loss_live_pub,
+                            tx_pkt, rx_pkt);
+
         if (!path->conf.fixed_rate)
             path->tx.rate += path->tx.rate / 10;
     }
@@ -2019,6 +2118,7 @@ mud_recv_msg(struct mud *mud, struct mud_path *path,
             path->msg.tx.total = tx_total;
             path->msg.rx.total = rx_total;
             path->msg.set = 1;
+            path->msg.tx_seen = now;
         }
         /* rx.loss: derived locally from the peer's own tx counters (sent in
          * every message, no echo needed) against our own real rx counters,
@@ -2036,6 +2136,17 @@ mud_recv_msg(struct mud *mud, struct mud_path *path,
                                 &path->rx.loss, &path->rx.loss_live,
                                 peer_tx_total - path->msg.rxloss.peer_total,
                                 path->rx.total - path->msg.rxloss.own_total);
+
+                /* Same event, also folded into the physical-link group --
+                 * see the matching comment beside mud_update_rl()'s own tx
+                 * feed. */
+                struct mud_group *grp = mud_group_get(mud, path);
+
+                if (grp)
+                    mud_update_loss(&grp->rx_loss, now, 0,
+                                    &grp->rx_loss_pub, &grp->rx_loss_live_pub,
+                                    peer_tx_total - path->msg.rxloss.peer_total,
+                                    path->rx.total - path->msg.rxloss.own_total);
             }
             path->msg.rxloss.peer_total = peer_tx_total;
             path->msg.rxloss.peer_bytes = peer_tx_bytes;
@@ -2405,8 +2516,23 @@ mud_path_update(struct mud *mud, struct mud_path *path, uint64_t now)
         path->status = MUD_DEGRADED;
         return 0;
     }
-    if (path->tx.loss > path->conf.loss_limit ||
-        path->rx.loss > path->conf.loss_limit) {
+    /* Read against the whole physical link's pooled loss (see struct
+     * mud_group's own comment), not just this one sub-flow's -- a single
+     * bad sub-flow no longer degrades on its own, and a whole link degrades
+     * and recovers together, both by design (see the "Group loss" section
+     * of glorytun-notes.html). mud_group_get() reads the group's currently
+     * published figures directly rather than through a once-per-tick
+     * mirrored copy, so this decision is never a tick stale on top of
+     * whatever the underlying rolling window itself already costs. Falls
+     * back to this path's own tx.loss/rx.loss only in the practically
+     * unreachable case of every group slot already being in use (see
+     * mud_group_get()'s own comment). */
+    struct mud_group *grp = mud_group_get(mud, path);
+    const uint64_t group_tx_loss = grp ? grp->tx_loss_pub : path->tx.loss;
+    const uint64_t group_rx_loss = grp ? grp->rx_loss_pub : path->rx.loss;
+
+    if (group_tx_loss > path->conf.loss_limit ||
+        group_rx_loss > path->conf.loss_limit) {
         path->status = MUD_LOSSY;
         return 0;
     }
@@ -2489,6 +2615,38 @@ mud_path_track(struct mud *mud, struct mud_path *path, uint64_t now)
                         &path->tx.loss, &path->tx.loss_live, 0, 0);
         mud_update_loss(&path->msg.rx_loss, now, 1,
                         &path->rx.loss, &path->rx.loss_live, 0, 0);
+    } else {
+        /* Real data is moving on this path (traffic_idle is false), but
+         * that says nothing about whether *this path's own* tx.loss/
+         * rx.loss have had anything fresh to compute from lately -- both
+         * only update when a message from the peer, on this exact
+         * sub-flow, successfully arrives with fresh counters (see
+         * mud_recv_msg()), and on a lossy link that can itself keep
+         * failing for a stretch by chance while real data still gets
+         * through often enough to keep traffic_idle false. Confirmed live
+         * on a real router: one sub-flow's rx-loss sat completely frozen
+         * for 25+ continuous seconds this way, on a path that was
+         * genuinely carrying traffic the whole time -- see "Group loss/
+         * RTT" in glorytun-notes.html. Age tx/rx independently (one can be
+         * stuck while the other isn't) once it's been more than
+         * MUD_MSG_SENT_MAX beats since the last one that actually landed
+         * -- the same threshold mud_path_update() already uses elsewhere
+         * to call a path unresponsive, so this fires only once a sub-flow
+         * is genuinely, not just momentarily, behind. Safe against the
+         * interference the equivalent group-level attempt hit (see that
+         * same section): unlike traffic_idle, which is true almost
+         * continuously for a beat-only exchange, "stuck for N beats" is
+         * true only while the event-driven feed genuinely isn't
+         * succeeding, so the two are never fighting over the same
+         * in-progress bucket. */
+        const uint64_t stuck_after = MUD_MSG_SENT_MAX * path->conf.beat;
+
+        if (path->msg.tx_seen && mud_timeout(now, path->msg.tx_seen, stuck_after))
+            mud_update_loss(&path->msg.tx_loss, now, 1,
+                            &path->tx.loss, &path->tx.loss_live, 0, 0);
+        if (path->msg.rxloss.time && mud_timeout(now, path->msg.rxloss.time, stuck_after))
+            mud_update_loss(&path->msg.rx_loss, now, 1,
+                            &path->rx.loss, &path->rx.loss_live, 0, 0);
     }
 
     if (path->conf.state != MUD_UP)
@@ -2636,6 +2794,82 @@ mud_update(struct mud *mud)
         weighted_rate += path->select_weight;
     }
     mud->rate = weighted_rate;
+
+    /* Group RTT aggregation, and mirroring loss+RTT onto every member path
+     * -- see struct mud_group's own comment. mud_path_update() above (via
+     * mud_group_get()) already reads each group's tx_loss_pub/rx_loss_pub
+     * directly for the LOSSY decision, kept continuously fresh by
+     * mud_recv_msg()'s event-driven feed alone -- deliberately no once-per-
+     * tick idle-ageing call here to match it, unlike mud_path_track()'s own
+     * per-path equivalent. A per-path tracker needs that fallback because a
+     * single-socket path's beat cadence backs off to `keepalive` (25s) once
+     * idle (see mud_path_track()'s own comment), so long gaps between any
+     * message at all are routine and must be aged through. A group's
+     * tracker has no such gap to cover: with multiple sockets (the only
+     * case a group has more than one member to begin with) beats never back
+     * off, so at least one member's event-driven feed reaches this tracker
+     * every ~beat interval regardless of whether any *real* data is
+     * flowing -- confirmed live: adding the same idle-ageing call here,
+     * gated on every member's traffic_idle (which tracks real data only,
+     * deliberately excluding beat traffic -- see its own comment), fired on
+     * nearly every tick during a beat-only idle period and reset the
+     * tracker's in-progress bucket before the event-driven feed's own
+     * samples ever got a chance to close into it, leaving the published
+     * loss frozen for tens of seconds and then jumping abruptly once
+     * enough whole-second evictions had silently accumulated -- the same
+     * kind of staleness this whole mechanism exists to avoid, just moved
+     * to a different call site. A group whose members go fully idle in the
+     * beat sense too (the entire physical link down, not just quiet) is
+     * already caught by the pre-existing, unrelated MUD_MSG_SENT_MAX ->
+     * MUD_DEGRADED path in mud_path_update(), so nothing here needs to
+     * duplicate that. */
+    for (unsigned i = 0; i < MUD_PATH_MAX; i++) {
+        struct mud_group *grp = &mud->groups[i];
+
+        if (grp->active) {
+            grp->rtt_sum = 0;
+            grp->rtt_count = 0;
+        }
+    }
+    for (unsigned i = 0; i < mud->capacity; i++) {
+        struct mud_path *path = &mud->paths[i];
+
+        if (path->status != MUD_RUNNING)
+            continue;
+
+        struct mud_group *grp = mud_group_get(mud, path);
+
+        if (!grp)
+            continue;
+        grp->rtt_sum += path->rtt.val;
+        grp->rtt_count++;
+    }
+    for (unsigned i = 0; i < mud->capacity; i++) {
+        struct mud_path *path = &mud->paths[i];
+
+        if (path->conf.state != MUD_UP && path->conf.state != MUD_PASSIVE) {
+            path->group_tx_loss = path->group_rx_loss = 0;
+            path->group_tx_loss_live = path->group_rx_loss_live = 0;
+            path->group_rtt = 0;
+            continue;
+        }
+        struct mud_group *grp = mud_group_get(mud, path);
+
+        if (!grp) {
+            path->group_tx_loss = path->tx.loss;
+            path->group_rx_loss = path->rx.loss;
+            path->group_tx_loss_live = path->tx.loss_live;
+            path->group_rx_loss_live = path->rx.loss_live;
+            path->group_rtt = path->rtt.val;
+            continue;
+        }
+        path->group_tx_loss = grp->tx_loss_pub;
+        path->group_rx_loss = grp->rx_loss_pub;
+        path->group_tx_loss_live = grp->tx_loss_live_pub;
+        path->group_rx_loss_live = grp->rx_loss_live_pub;
+        path->group_rtt = grp->rtt_count ? grp->rtt_sum / grp->rtt_count
+                                          : path->rtt.val;
+    }
 
     /* Per-path resequencing hold budget -- see mud_path.reorder_hold's own
      * comment in mud.h, and mud_reorder_insert()/mud_reorder_flush() below.

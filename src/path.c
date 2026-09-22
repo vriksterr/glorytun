@@ -27,8 +27,18 @@ gt_path_status_text(struct ctl_msg *res)
 }
 
 /* Two rows belong under the same group header if they're sub-flows of the
- * same logical path -- same interface (or both legacy/no interface) and
- * same remote endpoint, differing only in conf.sock. */
+ * same physical link -- same interface (or both legacy/no interface) and
+ * same remote *address*, differing only in conf.sock. Deliberately not
+ * remote port: mirrors mud_path_same_group() in mud.c exactly (see its own
+ * comment there) -- comparing port too, as an earlier version of this
+ * function did, groups correctly from the active side (every one of its
+ * sub-flows shares the same fixed remote port) but silently splits the
+ * passive side's own view into one header per sub-flow, since each one it
+ * auto-discovers has a distinct remote port by definition. That mismatch
+ * would otherwise also fragment group_tx_loss/group_rx_loss/group_rtt's
+ * display -- correct values, just repeated across several one-line
+ * "groups" instead of pooled into the one that mud.c itself already
+ * computed them for. */
 static int
 gt_path_same_group(struct ctl_msg *a, struct ctl_msg *b)
 {
@@ -39,8 +49,7 @@ gt_path_same_group(struct ctl_msg *a, struct ctl_msg *b)
     gt_toaddr(ra, sizeof(ra), &a->path.conf.remote);
     gt_toaddr(rb, sizeof(rb), &b->path.conf.remote);
 
-    return !strcmp(ra, rb) &&
-           gt_get_port(&a->path.conf.remote) == gt_get_port(&b->path.conf.remote);
+    return !strcmp(ra, rb);
 }
 
 static int
@@ -286,15 +295,26 @@ gt_path_status(int fd)
             memcpy(index_str, "-", 2);
 
         if (rows[g].path.conf.remote.sa.sa_family == AF_INET6)
-            printf("%s  index %s  %s -> [%s]:%"PRIu16"\n",
+            printf("%s  index %s  %s -> [%s]:%"PRIu16,
                    rows[g].ifname[0] ? rows[g].ifname : "-",
                    index_str, local, remote,
                    gt_get_port(&rows[g].path.conf.remote));
         else
-            printf("%s  index %s  %s -> %s:%"PRIu16"\n",
+            printf("%s  index %s  %s -> %s:%"PRIu16,
                    rows[g].ifname[0] ? rows[g].ifname : "-",
                    index_str, local, remote,
                    gt_get_port(&rows[g].path.conf.remote));
+
+        /* Pooled across every sub-flow of this physical link -- see
+         * struct mud_path's group_tx_loss/group_rx_loss/group_rtt fields
+         * (mud.h) for why this is what actually drives the losslimit/
+         * MUD_LOSSY decision now, not any one sub-flow's own (possibly
+         * stale) numbers below. Any member row carries the same mirrored
+         * value, so rows[g] (the group's first row) is as good as any. */
+        printf("  rtt %.3f  tx-loss %3.2f  rx-loss %3.2f\n",
+               rows[g].path.group_rtt / 1e3,
+               rows[g].path.group_tx_loss * 100 / 255.0,
+               rows[g].path.group_rx_loss * 100 / 255.0);
 
         for (unsigned int k = 0; k < member_count; k++) {
             printed[members[k]] = 1;
