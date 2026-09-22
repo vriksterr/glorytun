@@ -693,7 +693,7 @@ pppoe-ISP1_WAN  index 23  103.86.175.108 -&gt; 2.27.157.112.5000
         </div>
         <div class="card">
           <h4>Adaptive per path, not one flat delay</h4>
-          <p>New <code class="inline">mud_path.reorder_hold</code>, recomputed every <code class="inline">mud_update()</code> tick from each path's <em>real measured RTT</em>: how much longer, relative to the tunnel's current slowest RUNNING path, a packet on <em>this specific path</em> needs to wait. The slowest path itself gets <code class="inline">0</code> and skips the buffer entirely — nothing can be behind it. <code class="inline">reorder_window</code> still caps it, but no longer <em>is</em> it. A second-round fix, not the original design — see below.</p>
+          <p>New <code class="inline">mud_path.reorder_hold</code>, recomputed every <code class="inline">mud_update()</code> tick from each path's <em>real measured RTT</em>: how much longer, relative to the tunnel's current slowest RUNNING path, a packet on <em>this specific path</em> needs to wait. The slowest path itself gets <code class="inline">0</code> and skips the buffer entirely — nothing can be behind it — and so does any path within 0.5&nbsp;ms of it (that is RTT noise, not a real difference). <code class="inline">reorder_window</code> still caps it, but no longer <em>is</em> it. A second-round fix, not the original design — see below.</p>
         </div>
         <div class="card">
           <h4>Worker-loop only</h4>
@@ -701,7 +701,7 @@ pppoe-ISP1_WAN  index 23  103.86.175.108 -&gt; 2.27.157.112.5000
         </div>
       </div>
 
-      <p style="max-width:74ch">Each buffered packet gets a <code class="inline">deadline</code> fixed at the moment it's buffered: local arrival time plus that packet's own path's <code class="inline">reorder_hold</code> (capped by <code class="inline">reorder_window</code>). <code class="inline">mud_reorder_flush()</code> simply releases everything whose deadline has passed, sorted by deadline. No wire-protocol change was needed even for this: the whole scheme runs on RTT this side already measures locally (the same beat-message RTT <code class="inline">glorytun path</code> already shows) and never touches the peer's clock at all — a stronger version of the original design's promise, which still read the peer's own send-timestamp field. The buffer never blocks or drops a packet to make room: one that doesn't fit, or whose own path's hold caps to zero, is simply delivered immediately — exactly like every packet is with the feature off. Correctness never depends on this buffer; only the reordering benefit does.</p>
+      <p style="max-width:74ch">Each buffered packet gets a <code class="inline">deadline</code> fixed at the moment it's buffered: local arrival time plus that packet's own path's <code class="inline">reorder_hold</code> (capped by <code class="inline">reorder_window</code>). <code class="inline">mud_reorder_flush()</code> simply releases everything whose deadline has passed, sorted by deadline; workers sleep in <code class="inline">poll()</code> only until the earliest pending deadline, so a release is never left waiting for unrelated traffic. No wire-protocol change was needed even for this: the whole scheme runs on RTT this side already measures locally (the same beat-message RTT <code class="inline">glorytun path</code> already shows) and never touches the peer's clock at all — a stronger version of the original design's promise, which still read the peer's own send-timestamp field. The buffer never blocks or drops a packet to make room: one that doesn't fit, or whose own path's hold caps to zero, is simply delivered immediately — exactly like every packet is with the feature off. Correctness never depends on this buffer; only the reordering benefit does.</p>
 
       <p style="max-width:74ch"><strong>Two mutexes, doing different jobs.</strong> <code class="inline">lock</code> guards the buffer's own contents — plain memory access only, never held across a syscall, same discipline <code class="inline">state_lock</code> already follows elsewhere in <code class="inline">mud.c</code>. <code class="inline">flush_lock</code> is new territory for this file: it serializes the <em>entire</em> deliver-to-TUN phase across worker threads, not just the syscalls, because strict ordering requires that only one thread's batch of releases is ever in flight at a time — two threads flushing concurrently could otherwise interleave their own correctly-sorted batches with each other and reintroduce the exact reordering the buffer exists to remove.</p>
 
@@ -777,6 +777,122 @@ adaptive reorderwindow 60ms, 2 runs 33-39 Mbps    1100-1165 retransmits</span></
 set dev gt0 kxtimeout 1h timetolerance 10m keepalive 25s reorderwindow 20ms</pre>
       </div>
       <p class="note">Same convention as <code class="inline">keepalive</code>/<code class="inline">timetolerance</code>/<code class="inline">kxtimeout</code>: <code class="inline">0</code> means "leave unchanged," not "disable" — once set, it can only be raised to a new value through this command, never reset back to <code class="inline">0</code> without restarting the daemon.</p>
+
+      <h3 id="reorder-sparse" style="margin-top:2rem;font-size:1.05rem">Held packets were released late on sparse traffic — found and fixed</h3>
+      <p style="max-width:74ch">Tested on two VMs with <code class="inline">tc netem</code> delaying the tunnel's sub-flows by UDP port to imitate two ISPs (fast group ≈ 4.4&nbsp;ms round-trip, slow group ≈ 14.3&nbsp;ms), using a small sequence-numbered UDP echo tool to count out-of-order packets and measure round-trip per packet. The feature does what it is for on a dense stream — but it added a large, unexpected delay to sparse traffic.</p>
+      <div class="thread-grid">
+        <div class="card">
+          <h4>The bug</h4>
+          <p>A buffered packet was only released when a worker next ran <code class="inline">mud_reorder_flush()</code>, and a worker only ran when a packet arrived or its 100&nbsp;ms idle <code class="inline">poll()</code> timed out. Nothing woke a worker at the packet's own deadline. Dense traffic wakes workers constantly, so holds were accurate. A 20&nbsp;pps flow instead got its held packet released one packet-gap late (or up to 100&nbsp;ms late at 5&nbsp;pps). The "release timing became inconsistent" seen on the long-haul test above was this same cause.</p>
+        </div>
+        <div class="card">
+          <h4>Made worse by noise</h4>
+          <p>Two equal paths still differ by a few hundredths of a millisecond in smoothed RTT, so the "faster" one got a tiny non-zero <code class="inline">reorder_hold</code> and was buffered — and then hit the bug above. With no skew at all, round-trip went 4.7&nbsp;ms → 36&nbsp;ms.</p>
+        </div>
+        <div class="card">
+          <h4>The fix</h4>
+          <p><strong>1.</strong> The buffer tracks its earliest deadline (<code class="inline">next_deadline</code>); each worker's <code class="inline">poll()</code> timeout is now "time until that deadline" (rounded up to 1&nbsp;ms), still capped at 100&nbsp;ms. <strong>2.</strong> A computed hold under <code class="inline">MUD_REORDER_MIN_HOLD</code> (500&nbsp;µs) counts as measurement noise and becomes 0, so equal paths never enter the buffer.</p>
+        </div>
+      </div>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">mean round-trip, reorderwindow 50ms, before → after the fix</span></div>
+        <pre><span class="dim">equal paths, 20 pps        35.7 ms  →   4.71 ms   (off: 4.72)
+skewed paths, 20 pps      37-47 ms  →  14.8 ms    (off: 9.8)
+skewed paths,  5 pps      40 ms (max 104)  →  15.1 ms (max 16.1)
+skewed paths, 50 pps      16.8 ms (p50 20.1)  →  14.9 ms
+skewed paths, 200 pps     (not measured)   →  14.6 ms</span></pre>
+      </div>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">dense 1000 pps, skewed paths, out of order (client→server / server→client)</span></div>
+        <pre><span class="dim">off                 47.9% / 61.6%      mean round-trip  9.3 ms
+on, 3 runs          0.00-0.23% / 0.00-0.28%   mean 14.4-14.5 ms
+on, equal paths     0.00% / 0.00%      mean  4.3 ms
+on, ±1 ms jitter    13% / 23%          (off: 50% / 64%)</span></pre>
+      </div>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">CPU of the tunnel process (% of one core), 4 workers, skewed paths</span></div>
+        <pre><span class="dim">                     off (client / server)    reorderwindow 50ms (client / server)
+idle                 0.8% / 1.0%              0.8% / 1.0%
+sparse, 20 pps       0.9% / 1.0%              0.9% / 1.1%
+dense, 1000 pps      4.9% / 4.7%              6.9% / 7.1%</span></pre>
+      </div>
+      <p style="max-width:74ch" class="note"><strong>What this shows, and what it doesn't.</strong> Skewed paths settle at the <em>slow</em> path's latency — the price of resequencing; the fix removes the extra sparse-traffic penalty, not that price. Two of the three dense "on" runs had a single one-second blip (2-4%, both directions at the same second, probably the ~100&nbsp;ms RTT recompute); before the fix, 3 of 14 dense runs had a persistent 5-8% instead. The jitter row's residual is probably netem shuffling packets <em>within</em> one path, which resequencing can't undo — not verified. TCP single stream (12&nbsp;s, 2 runs each, skewed paths): 532/512&nbsp;Mbit/s off vs 555/749 on, with retransmits 20/41 vs 14/1161 — inconclusive; an earlier single run looked much worse and did not reproduce. <strong>Still not fixed:</strong> packets sent back-to-back in a burst are not reordered, because data packets carry no sequence number and order is inferred from per-path RTT only. Fixing that needs a wire-protocol change (sequence numbers) and has not been done.</p>
+
+      <h3 id="reorder-pollerr" style="margin-top:2rem;font-size:1.05rem">Side find: a worker spun at 100% after a peer restarted — fixed</h3>
+      <p style="max-width:74ch">Found while measuring the CPU cost above (unrelated to resequencing). Once a path is confirmed live, the server moves it onto its own <em>connected</em> UDP socket. If that peer then disappears — client killed or restarted, source port changed — the kernel answers the next send with an ICMP "port unreachable", which sits on the socket as a pending error and makes <code class="inline">poll()</code> report <code class="inline">POLLERR</code> instantly, every time. The worker loop only handled <code class="inline">POLLIN</code>, so nothing ever consumed the error and the owning worker thread spun at ~100% of a core indefinitely (a fresh client did not clear it; a second dead client added a second spinning thread). The fix reads <code class="inline">SO_ERROR</code> on any socket that reports <code class="inline">POLLERR</code>, which clears it.</p>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">server CPU (% of one core), client killed with SIGKILL, then restarted, then killed again</span></div>
+        <pre><span class="dim">                              alive   +12s    +40s    new client   killed again +20s
+without the fix, run 1        1.0     103.0   103.2   102.9        104.5
+without the fix, run 2        0.9       0.4   102.9   103.5        206.2
+with the fix, run 1           1.1       0.2     0.4     1.0          0.2
+with the fix, run 2           1.0       0.4     0.2     0.9          0.2
+with the fix, reorderwindow   1.1       0.5     0.4     0.9          0.2</span></pre>
+      </div>
+      <p style="max-width:74ch" class="note">The spin can start a while after the peer dies (run 2 was still idle at +12 s), because it needs the server to send once more and get the ICMP answer back. On real hardware the trigger would be a router reboot or an ISP reconnect that changes the source port while the VPS keeps running; whether this was behind the pegged core first reported on the real systems was not checked.</p>
+
+      <h3 id="reorder-seq" style="margin-top:2rem;font-size:1.05rem">Sequence numbers: exact resequencing instead of a guess from RTT</h3>
+      <p style="max-width:74ch">The hold computed from RTT skew (above) is an estimate, refreshed only once per <code class="inline">mud_update()</code> tick (~100ms) and fuzzy by a few hundred microseconds even between two equal-speed paths. That is fine for a steady stream, where the next packet's arrival is itself the signal that lets the estimate self-correct. It is not fine for two cases: packets sent back-to-back in a burst, closer together than the estimate's own fuzz, whose relative order the estimate cannot resolve at all; and a lone packet on the fast path with nothing else in flight, which the flat estimate still delays by the full skew even though nothing needs waiting for. Both were confirmed by testing, not assumed -- see the two tables below.</p>
+      <div class="thread-grid">
+        <div class="card">
+          <h4>Opt-in per direction, wire-compatible</h4>
+          <p><code class="inline">reorderwindow</code> being set now also tells the peer, in every control message, "stamp what you send me" (one new flag bit; the message only grows if this or the reply below applies, so a tunnel with the option off is byte-for-byte unchanged). A peer that understands the request stamps a 4-byte number onto each outgoing data packet -- inside the encrypted payload, so authenticated like the rest of it -- starting 2 seconds later (<code class="inline">MUD_SEQ_LEAD</code>) and announces that start time, in its own clock, in its own control messages, so both ends always agree which packets carry a number without needing an extra per-packet flag. An older build, or a peer with <code class="inline">reorderwindow</code> off, never gets asked and never stamps; its packets keep using the RTT-based hold above. Independent per direction, like the option itself.</p>
+        </div>
+        <div class="card">
+          <h4>Exact where a guess can't be</h4>
+          <p>A numbered packet is released the moment every lower number has been delivered -- no estimate involved -- so an in-order packet, including the only packet of a sparse flow, is never delayed at all. A missing number is waited for up to the same RTT-derived hold plus a small margin, then given up on as lost, same trade-off as before, just applied to a real gap instead of every packet.</p>
+        </div>
+      </div>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">round-trip ms, skewed paths (~4.4ms / ~14.3ms), resequencing off / RTT-hold / sequence numbers</span></div>
+        <pre><span class="dim">dense stream, 1000pps            9.3      14.5     12.5   (mean)
+sparse, 20pps                    9.6      15.1      9.8   (mean)
+sparse, 5pps                     -        15.2      9.9   (mean)</span></pre>
+      </div>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">out of order %, bursts of 20 back-to-back packets, skewed paths</span></div>
+        <pre><span class="dim">off              74% / 80%
+RTT-hold         74% / 80%   -- no real improvement; the burst is tighter than the hold's own precision
+sequence numbers  0.5-5.8% / 1.4-5.8%   -- 2 runs; a straggler occasionally still arrives just after being given up on</span></pre>
+      </div>
+      <p style="max-width:74ch">Jitter (±1ms) and 2% loss on the slow group were also tested: sequence numbers held ordering at ~0% in both (RTT-hold left 14-24% under jitter), and real loss was handled cleanly -- a missing number is given up on at its deadline and delivery continues, loss rate unaffected (~2% lost either way), one run's p99 climbed to 21ms. A mixed pair (one end running this build, the other the previous one) fell back to the RTT-hold method for that direction with no error, confirming the wire format stays compatible in both directions. Killing and restarting a peer mid-stream while stamped was also tested: no hang, no CPU spin (see the POLLERR fix above -- unrelated code path, unaffected here), tunnel resumed normally.</p>
+      <h4 style="margin-top:1.5rem;font-size:0.95rem">Two bugs live testing caught, same pattern as every other one on this page</h4>
+      <p style="max-width:74ch">The first version kept stamped packets in the same array as the RTT-hold ones and sorted the whole buffered set by sequence number on every flush -- correct, but O(n²) in however much was buffered, and a single TCP stream immediately built up a real backlog: CPU climbed to a full core within ~8 seconds and throughput collapsed by ~4x. Sequence numbers are already an array index, so the fix removes the sort entirely: stamped packets live in their own ring, <code class="inline">seq % ring size</code>, an O(1) write and read. That alone didn't fix it -- a second look-alike bug was hiding underneath: releasing packets also has to notice when a predecessor is genuinely missing, and the scan written to find that walked the <em>entire</em> ring every time it found nothing there, which is the common case (most packets need no holding at all). A cheap running count of what's actually buffered turned that into an O(1) check for the case that matters. Verified directly: a live debug trace during a TCP run showed the buffer staying at a stable 100-220 packets with small (1-10 slot) gaps throughout -- exactly the shape the design assumes -- confirming the fix, not just the CPU number improving.</p>
+      <p style="max-width:74ch" class="note">TCP throughput is the one place sequence numbers measured <em>worse</em> than the RTT-hold method, and this is believed to be real, not a leftover bug: strict in-order delivery means a single delayed packet holds back everything sent after it until it either arrives or is given up on, then releases all of it in one burst rather than smoothly -- and that burst pattern, repeated continuously under sustained throughput, appears to disturb TCP's own ACK-clocked congestion control. Measured cleanly (a direct <code class="inline">iperf3</code> run, no concurrent instrumentation -- an earlier measurement that polled CPU over a fresh SSH connection every second turned out to be contaminating the result itself and was discarded): off and the RTT-hold method reached 530-860Mbps with 43-3536 retransmits; sequence numbers reached 200-440Mbps with only 2-6 retransmits.</p>
+
+      <h4 style="margin-top:1.5rem;font-size:0.95rem">The bursty pattern, confirmed directly; a cheap fix for it, tried and disproven</h4>
+      <p style="max-width:74ch">A <code class="inline">tcpdump</code> capture of the tunnel's own decrypted traffic on <code class="inline">gt0</code>, during a live TCP upload, confirmed the theory directly rather than leaving it as a guess:</p>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">inter-packet gap, ms (mean / p99), and how often a run of packets is released all at once</span></div>
+        <pre><span class="dim">                    data in (mean/p99)   ACKs out (mean/p99)   "burst-release" events
+RTT-hold method       0.060 / 0.225 ms     0.087 / 0.417 ms     10
+sequence numbers      0.281 / 5.021 ms     0.676 / 8.920 ms    191</span></pre>
+      </div>
+      <p style="max-width:74ch">19x more burst-release events, and the gaps between them 20x longer -- a real stop-and-go pattern, not a smooth stream, and it shows up in the ACKs the server sends back just as much as in the data it receives. The obvious cheap fix -- cap how many packets one <code class="inline">mud_seq_flush()</code> call releases at once, so a big backlog empties over several smaller calls instead of one -- was tried and made no measurable difference (4 runs, 194-268Mbps, the same range as without the cap). The reason became clear on reflection: under sustained throughput the worker loop calls <code class="inline">mud_seq_flush()</code> again immediately, with no real time elapsing between calls, so capping the count per call doesn't introduce any actual pacing, just more calls doing less work each.</p>
+
+      <h4 style="margin-top:1.5rem;font-size:0.95rem">A real playout-timer pacer was built and tested -- it fixed the burstiness and still didn't help</h4>
+      <p style="max-width:74ch">Built on the same idea as an audio/video jitter buffer: an EWMA of the recent gap between stamped packets arriving (same 1/8-weight smoothing <code class="inline">mud_update_stat()</code> already uses elsewhere), clamped to a 10-500&micro;s range, used to schedule each release in a backlog a little after the previous one instead of all at once -- reusing the existing <code class="inline">poll()</code>-timeout plumbing (see <code class="inline">mud_reorder_poll_timeout()</code>) to actually wait for real time to pass between releases, rather than the cheap cap's mistake of just doing less work per call. Only ever engaged for a real backlog (more than one packet ready at once) -- a single ready packet, the sparse-flow case the very first fix in this section exists for, is still released immediately, untouched by any of this.</p>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">tcpdump capture on gt0, sequence numbers, without pacing -&gt; with pacing</span></div>
+        <pre><span class="dim">burst-release events        191  ->  2
+data gap p99                5.0ms  ->  1.0ms
+ACK gap p99                 8.9ms  ->  1.5ms
+TCP throughput, 4 runs      199-436Mbps  ->  64-206Mbps
+retransmits, same runs      2-6          ->  2-1816</span></pre>
+      </div>
+      <p style="max-width:74ch">The pacing did exactly what it was built to do -- confirmed directly, not inferred from the throughput number alone -- and throughput still got worse, with retransmits climbing sharply in some runs. The mechanism: releasing a backlog immediately costs nothing beyond the hold already paid; pacing it instead adds <em>more</em> latency to every packet behind the first one, cumulatively -- the last packet in a 100-deep backlog at a 100&micro;s pace now arrives 10ms later than it would have unpaced, on top of whatever hold and network delay it already had. TCP's retransmission timeout reacts to added latency and RTT variance more harshly than it does to a burst of otherwise-timely packets, so smoothing the delivery shape traded one problem for a worse one. Reverted; real evidence against the natural-seeming fix, which is itself a useful result.</p>
+
+      <h4 style="margin-top:1.5rem;font-size:0.95rem">The actual fix: don't stamp TCP at all</h4>
+      <p style="max-width:74ch">The question that unlocked this: TCP already carries its own sequence numbers, retransmission and (via SACK) a real reordering tolerance, tuned by decades of use across the whole Internet. This tunnel's own strict resequencing was never needed to give TCP <em>ordering</em> -- only to stop TCP's congestion control from misreading path-selection-induced reordering as loss, which the far cruder RTT-derived hold already did reasonably well (see the very first card at the top of this section). Layering exact ordering on top of TCP's own machinery was solving a problem TCP is already reasonably equipped to tolerate, at a cost (the bursty release pattern above) that TCP tolerates badly.</p>
+      <p style="max-width:74ch"><code class="inline">mud_is_tcp()</code> reads a decrypted packet's inner IP header (version, then the protocol/next-header byte at the fixed offset that implies) to tell TCP apart from everything else, and both <code class="inline">mud_encrypt()</code> and the receive side now skip sequence-number treatment for TCP specifically -- a TCP packet still gets the RTT-derived hold if <code class="inline">reorderwindow</code> is set, just not the stricter, and for TCP counterproductive, sequence-number treatment. No wire-format change was needed: the classification reads bytes already present in the packet, computed identically on both ends, the same way <code class="inline">mud_seq_active()</code> already lets both sides agree on <em>whether</em> a packet is stamped without an extra flag. Wrong classification never affects correctness, only which of two already-safe paths a packet takes -- see the function's own comment.</p>
+      <div class="term">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="label">TCP throughput, 4 runs, skewed paths</span></div>
+        <pre><span class="dim">off                        529-856Mbps   (43-3536 retransmits)
+RTT-hold (delay) method    659-725Mbps   (240-2497 retransmits)
+sequence numbers (all)     199-436Mbps   (2-6 retransmits)
+sequence numbers, TCP excluded   604-650Mbps   (230-1440 retransmits)</span></pre>
+      </div>
+      <p style="max-width:74ch">Back in the same range as the RTT-hold method and off -- the TCP throughput problem this section opened with is resolved. Verified directly on the wire too, not just inferred from the throughput number: a mixed TCP+UDP capture showed the TCP data stream's 1400-byte packets with no corresponding 1404-byte stamped variant anywhere (349,558 packets, all unstamped), while the UDP echo test's packets in the same capture still showed the expected +4 bytes. The UDP-side wins this whole section exists for -- 0% burst reordering, sparse traffic keeping the fast path's latency -- were re-confirmed unchanged on the same binary (dense 0.00/0.24%, bursts of 20 0.07/3.75%, sparse 20pps and 5pps both 0.00%, mean ~9.8-9.9ms). Sequence-number resequencing now does the job it was actually good at (UDP, and anything else without TCP's own tolerance) and stays out of the way of the one traffic type that didn't need it and paid for it.</p>
     </section>
 
     <!-- ============ COMMANDS ============ -->

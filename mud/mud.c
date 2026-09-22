@@ -238,6 +238,56 @@ struct mud_keyx {
 #define MUD_REORDER_SLOT_SIZE   (2048U)
 #define MUD_REORDER_FLUSH_BATCH (32U)
 
+/* A path whose computed reorder_hold is below this is treated as having no
+ * hold at all (its packets bypass the buffer). Two paths that are, for
+ * practical purposes, the same speed still differ by a few hundred
+ * microseconds in their smoothed RTT readings (measurement noise), and
+ * buffering every packet on the "faster" one for that long buys no real
+ * reordering fix -- it only turns every such packet into one that has to be
+ * released by the deadline logic instead of going straight to TUN. Half a
+ * millisecond is comfortably above that noise and well below any path
+ * difference worth resequencing. */
+#define MUD_REORDER_MIN_HOLD    (500U)
+
+/* Sequence numbers -- see "Sequence-numbered resequencing" in mud.h.
+ *
+ * MUD_SEQ_SIZE: bytes appended to a data packet's plaintext while the
+ * sending side is stamping (inside the AEAD, so authenticated and never
+ * visible on the wire).
+ *
+ * MUD_SEQ_EXT_SIZE: the optional block after struct mud_msg in a control
+ * message -- one flags byte (bit 0: "I want sequence numbers on what you
+ * send me") plus the 6-byte time (in the SENDER's own mud_now() clock) from
+ * which that sender stamps its data packets, 0 = not stamping. It is only
+ * written when at least one of the two is non-zero, and only read when the
+ * message is long enough to hold it, so a build that has never heard of it
+ * neither sends nor is confused by it.
+ *
+ * MUD_SEQ_LEAD: how far in the future a sender sets its stamping start time
+ * when it first learns the peer wants numbers, so the announcement (carried
+ * by the very next control message on every path, normally <= 100ms away)
+ * reaches the receiver before the first stamped packet does.
+ *
+ * MUD_SEQ_GAP_MARGIN: extra time, on top of the arrival path's own
+ * reorder_hold, that a packet waits for a missing predecessor before that
+ * predecessor is declared lost. Only ever paid when something really is
+ * missing (a loss or a very late packet) -- an in-order packet is never
+ * delayed at all.
+ *
+ * MUD_SEQ_RESYNC: a stamped packet this far (in packets) from what was
+ * expected means the stream restarted (peer restart) rather than a real
+ * gap; start over from it. */
+#define MUD_SEQ_SIZE       (4U)
+#define MUD_SEQ_EXT_SIZE   (1U + MUD_TIME_SIZE)
+#define MUD_SEQ_FLAG_WANT  (1U)
+#define MUD_SEQ_LEAD       (2 * MUD_ONE_SEC)
+#define MUD_SEQ_GAP_MARGIN (3 * MUD_ONE_MSEC)
+#define MUD_SEQ_RESYNC     (65536)
+#define MUD_TIME_HALF      (UINT64_C(1) << (MUD_TIME_BITS - 1))
+
+#define MUD_ALOAD(P)     __atomic_load_n((P), __ATOMIC_RELAXED)
+#define MUD_ASTORE(P, V) __atomic_store_n((P), (V), __ATOMIC_RELAXED)
+
 struct mud_reorder_slot {
     unsigned char data[MUD_REORDER_SLOT_SIZE];
     size_t size;
@@ -249,6 +299,37 @@ struct mud_reorder_slot {
                         * at all). See mud_reorder_insert(). */
 };
 
+/* Storage for stamped (sequence-numbered) packets -- deliberately NOT the
+ * same array/algorithm as mud_reorder_slot above. An earlier version kept
+ * stamped packets in that same array and sorted the whole buffered set by
+ * sequence number on every flush; under sustained high packet rate a single
+ * slow-to-arrive packet lets the buffer fill with everything sent after it,
+ * and sorting that full set on every mud_worker_loop() iteration is O(n^2)
+ * in the buffer size -- a single-stream TCP test caught this directly: CPU
+ * climbed to a full core within ~8 seconds and throughput collapsed to a
+ * fraction of the no-sequencing case. A sequence number is already a direct
+ * array index, so there is no need to search or sort for it at all: this
+ * ring stores a packet at `seq % MUD_SEQ_RING_SIZE` and finds it again the
+ * same way, both O(1), and a release pass is O(1) amortized per packet
+ * released (each packet is written once and read once) regardless of how
+ * many packets are buffered at once. MUD_SEQ_RING_SIZE must be a power of
+ * two (see MUD_SEQ_RING_MASK) and comfortably larger than throughput (pps)
+ * times the largest hold this buffer will actually see -- 4096 covers
+ * several hundred ms at a sustained 10,000pps, generous for any single
+ * tunnel's worth of resequencing. */
+#define MUD_SEQ_RING_SIZE (4096U)
+#define MUD_SEQ_RING_MASK (MUD_SEQ_RING_SIZE - 1U)
+
+struct mud_seq_slot {
+    unsigned char data[MUD_REORDER_SLOT_SIZE];
+    size_t size;
+    uint32_t seq;
+    int occupied;
+    uint64_t deadline; /* set once, by whichever packet's arrival first
+                        * revealed the gap this slot is blocking on -- see
+                        * mud_seq_insert(). Meaningless while !occupied. */
+};
+
 /* Tunnel-wide (not per-path, not per-worker-thread): reordering happens
  * because packets from one flow cross different physical paths with
  * different latencies, so sorting has to happen after every path funnels
@@ -257,6 +338,39 @@ struct mud_reorder_slot {
 struct mud_reorder {
     struct mud_reorder_slot slot[MUD_REORDER_MAX];
     unsigned count;
+    uint64_t next_deadline;    /* earliest slot[].deadline currently held
+                                 * (0 = buffer empty), kept current by
+                                 * mud_reorder_insert() and the compaction
+                                 * step of mud_reorder_flush(); lets
+                                 * mud_worker_loop() sleep in poll() exactly
+                                 * until the next release is due instead of
+                                 * waiting for unrelated traffic or its
+                                 * idle timeout -- see
+                                 * mud_reorder_poll_timeout(). Guarded by
+                                 * lock, like slot[]/count. */
+    /* Everything below is the sequence-numbered path's own state (see
+     * struct mud_seq_slot) -- entirely separate storage and bookkeeping
+     * from slot[]/count/next_deadline above, guarded by the same lock. */
+    struct mud_seq_slot seq_ring[MUD_SEQ_RING_SIZE]; /* ~8.5MB, same
+                                 * always-allocated-with-struct-mud rationale
+                                 * as slot[] above and struct mud's own
+                                 * comment; trivial next to any system this
+                                 * workload runs on at all. */
+    uint32_t seq_next;          /* next sequence number due for delivery */
+    unsigned seq_count;          /* occupied seq_ring[] entries right now --
+                                 * lets mud_seq_flush() tell "genuinely
+                                 * nothing buffered" apart from "buffered,
+                                 * just not at the head yet" in O(1), instead
+                                 * of a scan across the whole ring finding
+                                 * that out the hard way on every single
+                                 * call (which is most calls, since most
+                                 * packets need no holding at all) -- see
+                                 * mud_seq_flush()'s own comment. */
+    int seq_sync;                /* seq_next is meaningful (else adopt the
+                                 * next stamped packet's number) */
+    uint64_t seq_next_deadline; /* deadline of whichever occupied ring slot
+                                 * is currently blocking delivery (0 = not
+                                 * currently blocked on anything) */
     pthread_mutex_t lock;       /* guards slot[]/count -- plain memory
                                  * access only, never held across a
                                  * syscall, same discipline as state_lock */
@@ -300,6 +414,15 @@ struct mud {
     uint64_t window;
     uint64_t window_time;
     uint64_t base_time;
+    /* Sequence-number state (see "Sequence-numbered resequencing" in
+     * mud.h). Accessed with MUD_ALOAD/MUD_ASTORE on any thread, not under
+     * state_lock: seq_tx_start is the time (own clock) from which we stamp
+     * outgoing data packets (0 = not stamping), seq_tx_next the counter,
+     * seq_rx_start the same start time as announced by the peer for what it
+     * sends us. */
+    uint64_t seq_tx_start;
+    uint32_t seq_tx_next;
+    uint64_t seq_rx_start;
     /* Guards everything above from sock_count down through window_time --
      * path/socket-pool state, rate/window accounting, error counters. Held
      * only around plain memory access (array scans, struct field
@@ -1306,11 +1429,106 @@ mud_delete(struct mud *mud)
     sodium_free(mud);
 }
 
+static inline void
+mud_store32(unsigned char *dst, uint32_t v)
+{
+    dst[0] = (unsigned char)v;
+    dst[1] = (unsigned char)(v >> 8);
+    dst[2] = (unsigned char)(v >> 16);
+    dst[3] = (unsigned char)(v >> 24);
+}
+
+static inline uint32_t
+mud_load32(const unsigned char *src)
+{
+    return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
+           ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
+}
+
+/* True if a data packet whose (sender's-clock) timestamp is `t` falls in a
+ * stamping period that began at `start` (0 = never). The very same test is
+ * made by the sender, on the exact timestamp it is about to write, and by
+ * the receiver, on the timestamp it reads -- so both always agree whether a
+ * given packet carries a sequence number, with no per-packet flag and no
+ * clock agreement between the two ends (both values are the sender's own
+ * clock). */
+static inline int
+mud_seq_active(uint64_t start, uint64_t t)
+{
+    return start && MUD_TIME_MASK(t - start) < MUD_TIME_HALF;
+}
+
+/* Best-effort classification of a tunneled IP packet's inner protocol --
+ * used only to decide whether a packet is eligible for this tunnel's own
+ * strict sequence-number resequencing (mud_seq_insert()/mud_seq_flush()),
+ * never for anything that needs to be exactly right for correctness.
+ *
+ * TCP already carries its own sequence numbers, retransmission and (with
+ * SACK, which is effectively universal today) a reordering tolerance tuned
+ * by decades of real-world use. Layering this tunnel's own strict ordering
+ * on top of that measurably hurt TCP throughput in testing -- see
+ * "Sequence numbers" in glorytun-notes.html -- even though it eliminated
+ * the false-retransmit problem resequencing exists to fix in the first
+ * place (out-of-order arrival, from mud_select_path()'s per-packet
+ * striping, misread by TCP as loss): TCP's own congestion control reacts
+ * worse to the added tail latency of a released backlog than it does to an
+ * occasional false retransmit. UDP and everything else has no such
+ * built-in tolerance, so it is exactly what benefits from strict
+ * resequencing while paying none of TCP's downside. A TCP packet excluded
+ * this way still gets the older RTT-derived hold (mud_reorder_insert()) if
+ * reorder_window is set -- it is not left completely unresequenced.
+ *
+ * Deliberately conservative, in the direction that costs nothing: anything
+ * not confidently identified as TCP -- too short to hold a full IP header,
+ * an unrecognized IP version, or an IPv6 packet whose immediate next-header
+ * isn't TCP (a true extension-header chain is not walked) -- is treated as
+ * NOT TCP, i.e. eligible for stamping, exactly like every packet already
+ * was before this existed. Getting the classification wrong never affects
+ * correctness or which bytes are delivered, only which of two already-safe
+ * paths a packet takes: at worst a TCP packet gets stamped like UDP
+ * (already extensively tested), or a non-TCP packet falls back to the RTT
+ * hold (also already-tested, safe behavior either way). */
+static inline int
+mud_is_tcp(const unsigned char *ip, size_t size)
+{
+    if (!size)
+        return 0;
+
+    const unsigned char version = ip[0] >> 4;
+
+    if (version == 4)
+        return size > 9 && ip[9] == 6;
+
+    if (version == 6)
+        return size > 6 && ip[6] == 6;
+
+    return 0;
+}
+
 static size_t
 mud_encrypt(struct mud *mud, uint64_t now,
             unsigned char *dst, size_t dst_size,
             const unsigned char *src, size_t src_size)
 {
+    /* Sequence number for the peer's resequencing buffer, appended to the
+     * plaintext (so it is encrypted and authenticated with the packet).
+     * Only while the peer has asked for them -- otherwise this packet is
+     * byte-for-byte what it always was. The copy is the price of not
+     * requiring every caller to leave room after its plaintext. */
+    unsigned char stamped[MUD_PKT_MAX_SIZE];
+
+    if (mud_seq_active(MUD_ALOAD(&mud->seq_tx_start), now) &&
+        !mud_is_tcp(src, src_size)) {
+        if (src_size + MUD_SEQ_SIZE + MUD_PKT_MIN_SIZE > dst_size ||
+            src_size + MUD_SEQ_SIZE > sizeof(stamped))
+            return 0;
+
+        memcpy(stamped, src, src_size);
+        mud_store32(stamped + src_size,
+                    __atomic_fetch_add(&mud->seq_tx_next, 1, __ATOMIC_RELAXED));
+        src = stamped;
+        src_size += MUD_SEQ_SIZE;
+    }
     const size_t size = src_size + MUD_PKT_MIN_SIZE;
 
     if (size > dst_size)
@@ -1479,6 +1697,25 @@ mud_send_msg(struct mud *mud, struct mud_path *path, uint64_t now,
 
     if (size < MUD_PKT_MIN_SIZE + sizeof(struct mud_msg))
         size = MUD_PKT_MIN_SIZE + sizeof(struct mud_msg);
+
+    /* Optional sequence-number block after the fixed message: "I want
+     * numbers" (we resequence what we receive) and "I stamp from time T".
+     * Omitted entirely -- message size and contents unchanged -- unless one
+     * of the two applies, so with reorderwindow off nothing on the wire
+     * differs from a build without this. */
+    const unsigned int seq_want = mud->conf.reorder_window ? MUD_SEQ_FLAG_WANT : 0;
+    const uint64_t seq_start = MUD_ALOAD(&mud->seq_tx_start);
+
+    if (seq_want || seq_start) {
+        const size_t need = MUD_PKT_MIN_SIZE + sizeof(struct mud_msg) +
+                            MUD_SEQ_EXT_SIZE;
+        unsigned char *ext = src + sizeof(struct mud_msg);
+
+        if (size < need)
+            size = need;
+        ext[0] = (unsigned char)seq_want;
+        mud_store(ext + 1, seq_start, MUD_TIME_SIZE);
+    }
 
     mud_store(dst, MUD_MSG_MARK(now), MUD_TIME_SIZE);
     MUD_STORE_MSG(msg->sent_time, sent_time);
@@ -1704,6 +1941,43 @@ mud_recv_msg(struct mud *mud, struct mud_path *path,
     const uint64_t tx_time = MUD_LOAD_MSG(msg->sent_time);
 
     mud_sock_from_addr(&path->remote, &msg->addr);
+
+    /* Sequence-number block (see MUD_SEQ_EXT_SIZE). Handled before anything
+     * else here -- this runs before the key exchange below can complete, so a
+     * restarted peer's "not stamping" always lands before any of its data
+     * packets can even be decrypted. A message without the block (older
+     * build, or reorderwindow off at the peer) reads as "doesn't want
+     * numbers, isn't stamping". */
+    {
+        const size_t plain = size - MUD_PKT_MIN_SIZE;
+        unsigned int flags = 0;
+        uint64_t start = 0;
+
+        if (plain >= sizeof(struct mud_msg) + MUD_SEQ_EXT_SIZE) {
+            const unsigned char *ext = data + sizeof(struct mud_msg);
+
+            flags = ext[0];
+            start = mud_load(ext + 1, MUD_TIME_SIZE);
+        }
+        if (flags & MUD_SEQ_FLAG_WANT) {
+            /* Start stamping a little in the future (MUD_SEQ_LEAD) so the
+             * peer has heard our start time before the first stamped packet
+             * reaches it. Once started, leave it alone. */
+            if (!MUD_ALOAD(&mud->seq_tx_start)) {
+                uint64_t st = MUD_TIME_MASK(now + MUD_SEQ_LEAD);
+
+                MUD_ASTORE(&mud->seq_tx_start, st ? st : 2);
+            }
+        } else if (MUD_ALOAD(&mud->seq_tx_start)) {
+            MUD_ASTORE(&mud->seq_tx_start, 0);
+        }
+        if (MUD_ALOAD(&mud->seq_rx_start) != start) {
+            MUD_ASTORE(&mud->seq_rx_start, start);
+            pthread_mutex_lock(&mud->reorder.lock);
+            mud->reorder.seq_sync = 0; /* new stream: adopt its numbering */
+            pthread_mutex_unlock(&mud->reorder.lock);
+        }
+    }
 
     if (tx_time) {
         mud_update_stat(&path->rtt, MUD_TIME_MASK(now - tx_time));
@@ -1970,10 +2244,13 @@ static int
 mud_recv_finish(struct mud *mud, unsigned int sock, struct msghdr *msg,
                 union mud_sockaddr *remote, unsigned char *packet,
                 ssize_t packet_size, unsigned char *data, size_t data_cap,
-                uint64_t *reorder_hold_out)
+                uint64_t *reorder_hold_out, int *stamped_out,
+                uint32_t *seq_out)
 {
     if (reorder_hold_out)
         *reorder_hold_out = 0;
+    if (stamped_out)
+        *stamped_out = 0;
 
     if ((msg->msg_flags & (MSG_TRUNC | MSG_CTRUNC)) ||
         (packet_size <= (ssize_t)MUD_PKT_MIN_SIZE))
@@ -1997,9 +2274,32 @@ mud_recv_finish(struct mud *mud, unsigned int sock, struct msghdr *msg,
     }
     pthread_mutex_unlock(&mud->state_lock);
 
-    const size_t ret = MUD_MSG(sent_time)
-                     ? mud_decrypt_msg(mud, data, data_cap, packet, (size_t)packet_size)
-                     : mud_decrypt(mud, data, data_cap, packet, (size_t)packet_size);
+    size_t ret = MUD_MSG(sent_time)
+               ? mud_decrypt_msg(mud, data, data_cap, packet, (size_t)packet_size)
+               : mud_decrypt(mud, data, data_cap, packet, (size_t)packet_size);
+
+    /* A data packet sent while its sender was stamping ends in a sequence
+     * number; take it off so nothing downstream ever sees it. Whether this
+     * packet is one is decided by its own timestamp against the start time
+     * the peer announced (see mud_seq_active()), and -- matching the
+     * sender's own mud_is_tcp() check in mud_encrypt(), computed here
+     * against the same early header bytes regardless of whether a trailing
+     * sequence number is actually present -- by its inner protocol not
+     * being TCP. */
+    uint32_t seq = 0;
+    int stamped = 0;
+
+    if (ret && !MUD_MSG(sent_time) &&
+        mud_seq_active(MUD_ALOAD(&mud->seq_rx_start), sent_time) &&
+        !mud_is_tcp(data, ret)) {
+        if (ret > MUD_SEQ_SIZE) {
+            seq = mud_load32(data + ret - MUD_SEQ_SIZE);
+            ret -= MUD_SEQ_SIZE;
+            stamped = 1;
+        } else {
+            ret = 0; /* claims a number but can't hold one: malformed */
+        }
+    }
 
     pthread_mutex_lock(&mud->state_lock);
 
@@ -2036,6 +2336,11 @@ mud_recv_finish(struct mud *mud, unsigned int sock, struct msghdr *msg,
 
     if (reorder_hold_out && !MUD_MSG(sent_time))
         *reorder_hold_out = path->reorder_hold;
+    if (stamped_out && stamped) {
+        *stamped_out = 1;
+        if (seq_out)
+            *seq_out = seq;
+    }
 
     mud->last_recv_time = now;
 
@@ -2075,7 +2380,7 @@ mud_recv(struct mud *mud, unsigned int sock, void *data, size_t size)
         return -1;
 
     return mud_recv_finish(mud, sock, &msg, &remote, packet, packet_size,
-                           data, size, NULL);
+                           data, size, NULL, NULL, NULL);
 }
 
 static int
@@ -2348,10 +2653,14 @@ mud_update(struct mud *mud)
     for (unsigned i = 0; i < mud->capacity; i++) {
         struct mud_path *path = &mud->paths[i];
 
-        path->reorder_hold = (path->status == MUD_RUNNING &&
-                              max_running_rtt > path->rtt.val)
-                            ? (max_running_rtt - path->rtt.val) / 2
-                            : 0;
+        uint64_t hold = (path->status == MUD_RUNNING &&
+                         max_running_rtt > path->rtt.val)
+                       ? (max_running_rtt - path->rtt.val) / 2
+                       : 0;
+
+        /* Below MUD_REORDER_MIN_HOLD is RTT measurement noise, not a real
+         * path difference -- see that constant's comment. */
+        path->reorder_hold = (hold >= MUD_REORDER_MIN_HOLD) ? hold : 0;
     }
     mud_update_window(mud, now);
     pthread_mutex_unlock(&mud->state_lock);
@@ -2874,6 +3183,96 @@ mud_reorder_insert(struct mud *mud, uint64_t hold, uint64_t now,
     s->size = size;
     s->deadline = now + hold;
 
+    if (!ro->next_deadline || s->deadline < ro->next_deadline)
+        ro->next_deadline = s->deadline;
+
+    pthread_mutex_unlock(&ro->lock);
+    return 1;
+}
+
+/* Buffers a data packet that carries a sequence number, in mud->reorder.
+ * seq_ring[seq % MUD_SEQ_RING_SIZE] -- an O(1) array write, no search or
+ * sort (see struct mud_seq_slot's own comment for why that matters). Unlike
+ * mud_reorder_insert() this never guesses from RTT whether a predecessor
+ * might still be in flight: the packet is released as soon as every lower
+ * number has been delivered (see mud_seq_flush()), so an in-order packet --
+ * including the only packet of a sparse flow -- is not delayed at all.
+ *
+ * `deadline`, stored with every slot, is how long a packet still missing
+ * when this one arrived may keep being waited for before it is given up on
+ * as lost: this packet's own path's reorder_hold (how much later than this
+ * path a slower one can legitimately be) plus MUD_SEQ_GAP_MARGIN, capped by
+ * mud_conf.reorder_window. mud_seq_flush() only ever reads the deadline of
+ * whichever occupied slot is currently blocking delivery -- see its own
+ * comment -- so computing and storing it here unconditionally, whether or
+ * not this insert turns out to be that slot, costs nothing worth avoiding
+ * and needs no extra bookkeeping about the ring's current shape.
+ *
+ * Returns 0, leaving the packet for the caller to deliver at once, when it
+ * is late (its number is already behind what was delivered -- holding it
+ * would achieve nothing), a duplicate, or when the ring has wrapped all the
+ * way around onto an entry still awaiting delivery (a real backlog of a
+ * full MUD_SEQ_RING_SIZE packets -- caller falls back to delivering this
+ * one unordered rather than overwriting the older one). */
+static int
+mud_seq_insert(struct mud *mud, uint32_t seq, uint64_t hold, uint64_t now,
+               const unsigned char *data, size_t size)
+{
+    if (size > MUD_REORDER_SLOT_SIZE)
+        return 0;
+
+    struct mud_reorder *ro = &mud->reorder;
+
+    pthread_mutex_lock(&ro->lock);
+
+    int32_t dist = (int32_t)(seq - ro->seq_next);
+
+    if (!ro->seq_sync || dist > MUD_SEQ_RESYNC || dist < -MUD_SEQ_RESYNC) {
+        /* First stamped packet of a stream, or a number so far from the
+         * expected one that the peer must have restarted its counter. The
+         * ring is indexed by seq & MUD_SEQ_RING_MASK, not by the full seq
+         * value, so a stale entry left over from before the restart could
+         * otherwise sit at the same ring position a new packet needs and
+         * be mistaken for a real duplicate (mud_seq_insert() returning 0,
+         * silently degrading that one packet to unordered delivery, never
+         * anything worse) until the new counter cycles past it. Clearing
+         * the ring on every resync -- itself a rare event, so paying
+         * MUD_SEQ_RING_SIZE here costs nothing that matters -- avoids that
+         * instead of waiting it out. */
+        memset(ro->seq_ring, 0, sizeof(ro->seq_ring));
+        ro->seq_count = 0;
+        ro->seq_next_deadline = 0;
+        ro->seq_next = seq;
+        ro->seq_sync = 1;
+        dist = 0;
+    }
+    if (dist < 0) {
+        pthread_mutex_unlock(&ro->lock);
+        return 0;
+    }
+    struct mud_seq_slot *s = &ro->seq_ring[seq & MUD_SEQ_RING_MASK];
+
+    if (s->occupied) {
+        /* Either this exact packet again (a retransmitted duplicate at the
+         * UDP level, which glorytun does not otherwise produce, or a
+         * duplicated path), or the ring has wrapped a full
+         * MUD_SEQ_RING_SIZE ahead of a still-unresolved gap -- either way,
+         * nothing safe to do but leave this one for the caller. */
+        pthread_mutex_unlock(&ro->lock);
+        return 0;
+    }
+    uint64_t wait = hold + MUD_SEQ_GAP_MARGIN;
+
+    if (wait > mud->conf.reorder_window)
+        wait = mud->conf.reorder_window;
+
+    memcpy(s->data, data, size);
+    s->size = size;
+    s->seq = seq;
+    s->deadline = now + wait;
+    s->occupied = 1;
+    ro->seq_count++;
+
     pthread_mutex_unlock(&ro->lock);
     return 1;
 }
@@ -2929,6 +3328,11 @@ mud_reorder_flush(struct mud *mud, int tun_fd, mud_tun_write_fn tun_write)
     pthread_mutex_lock(&ro->flush_lock);
     pthread_mutex_lock(&ro->lock);
 
+    if (!ro->count) {
+        pthread_mutex_unlock(&ro->lock);
+        pthread_mutex_unlock(&ro->flush_lock);
+        return;
+    }
     const uint64_t now = mud_now(mud);
     unsigned ready[MUD_REORDER_MAX];
     unsigned ready_count = 0;
@@ -2940,7 +3344,10 @@ mud_reorder_flush(struct mud *mud, int tun_fd, mud_tun_write_fn tun_write)
     /* Full insertion sort of the complete ready set by deadline. Runs
      * once per mud_worker_loop() iteration (not per packet), and
      * ready_count is bounded by MUD_REORDER_MAX, so O(n^2) here is cheap
-     * in practice. */
+     * in practice -- this array only ever holds packets sent before
+     * stamping began or by a peer that doesn't stamp at all (see
+     * mud_seq_flush() for the stamped, high-throughput path, which does
+     * not sort). */
     for (unsigned i = 1; i < ready_count; i++) {
         const unsigned key = ready[i];
         const uint64_t key_deadline = ro->slot[key].deadline;
@@ -2989,15 +3396,165 @@ mud_reorder_flush(struct mud *mud, int tun_fd, mud_tun_write_fn tun_write)
             keep[ready[i]] = 1;
 
         unsigned w = 0;
+        uint64_t next = 0;
 
         for (unsigned i = 0; i < ro->count; i++) {
-            if (!keep[i])
-                ro->slot[w++] = ro->slot[i];
+            if (keep[i])
+                continue;
+            if (!next || ro->slot[i].deadline < next)
+                next = ro->slot[i].deadline;
+            ro->slot[w++] = ro->slot[i];
         }
         ro->count = w;
+        ro->next_deadline = next; /* includes anything inserted meanwhile */
         pthread_mutex_unlock(&ro->lock);
     }
     pthread_mutex_unlock(&ro->flush_lock);
+}
+
+/* Delivers every currently-releasable stamped packet (see mud_seq_insert()),
+ * strictly in sequence order, via tun_write(). Unlike mud_reorder_flush()
+ * above there is nothing to sort: seq_ring is already indexed by sequence
+ * number, so "the next packet due" is exactly ro->seq_next & mask, an O(1)
+ * lookup, and a whole run of consecutive ready packets is released in a
+ * single O(k) walk (k = packets released this call) rather than a scan over
+ * the entire buffer. The forward scan used to find a give-up deadline for a
+ * gap is bounded by MUD_SEQ_RING_SIZE, but that bound is not what keeps this
+ * function cheap in the case that actually matters: this is called on every
+ * mud_worker_loop() iteration, and on most calls nothing needs holding at
+ * all, i.e. the ring is completely empty -- a case an earlier version of
+ * this scan (correctly, but expensively) confirmed by walking every one of
+ * MUD_SEQ_RING_SIZE slots and finding none occupied, on every single call.
+ * Caught the same way as the O(n^2) sort this replaced: a live throughput
+ * test, not code review -- CPU climbed to a full core and throughput
+ * collapsed by ~4x under sustained TCP, this time because call *frequency*
+ * (one attempted scan per RX pass, thousands/sec at real throughput) makes
+ * even a bound this size add up. ro->seq_count (see its own comment) turns
+ * that common case back into an O(1) check.
+ *
+ * Same locking discipline as mud_reorder_flush(): flush_lock serializes
+ * this whole function across worker threads so releases stay strictly
+ * ordered even with several threads inserting concurrently; ro->lock guards
+ * only plain memory access and is dropped before the tun_write() calls. */
+static void
+mud_seq_flush(struct mud *mud, int tun_fd, mud_tun_write_fn tun_write)
+{
+    if (!mud->conf.reorder_window)
+        return;
+
+    struct mud_reorder *ro = &mud->reorder;
+
+    pthread_mutex_lock(&ro->flush_lock);
+    pthread_mutex_lock(&ro->lock);
+
+    if (!ro->seq_sync || !ro->seq_count) {
+        ro->seq_next_deadline = 0;
+        pthread_mutex_unlock(&ro->lock);
+        pthread_mutex_unlock(&ro->flush_lock);
+        return;
+    }
+    const uint64_t now = mud_now(mud);
+    unsigned char out_data[MUD_REORDER_FLUSH_BATCH][MUD_REORDER_SLOT_SIZE];
+    size_t out_size[MUD_REORDER_FLUSH_BATCH];
+    unsigned n = 0;
+
+    for (;;) {
+        struct mud_seq_slot *s = &ro->seq_ring[ro->seq_next & MUD_SEQ_RING_MASK];
+
+        if (!s->occupied) {
+            /* Gap at the head. Look ahead (bounded scan -- see this
+             * function's own doc comment) for the first packet that has
+             * actually arrived: its own deadline says how much longer the
+             * missing one(s) below it may still be waited for. Nothing
+             * found at all means genuinely nothing is queued yet -- not a
+             * gap, just traffic that hasn't arrived, so there is nothing to
+             * give up on and no reason to keep scanning. */
+            uint32_t d = 1;
+            struct mud_seq_slot *g = NULL;
+
+            for (; d <= MUD_SEQ_RING_MASK; d++) {
+                struct mud_seq_slot *cand =
+                    &ro->seq_ring[(ro->seq_next + d) & MUD_SEQ_RING_MASK];
+
+                if (cand->occupied) {
+                    g = cand;
+                    break;
+                }
+            }
+            if (!g || now < g->deadline) {
+                ro->seq_next_deadline = g ? g->deadline : 0;
+                break;
+            }
+            /* Given up: the whole run below the found packet is skipped in
+             * one step, exactly like the array-based version used to. */
+            ro->seq_next += d;
+            continue;
+        }
+        if (n == MUD_REORDER_FLUSH_BATCH) {
+            /* Deliver what's staged so far and keep going -- same chunking
+             * mud_reorder_flush() uses, for bounded stack usage, and safe
+             * for the same reason: seq_ring is only ever appended to by
+             * insert (at ro->seq_next + something), never rewritten behind
+             * where this loop has already advanced past. */
+            pthread_mutex_unlock(&ro->lock);
+            for (unsigned i = 0; i < n; i++)
+                tun_write(tun_fd, out_data[i], out_size[i]);
+            n = 0;
+            pthread_mutex_lock(&ro->lock);
+            continue;
+        }
+        memcpy(out_data[n], s->data, s->size);
+        out_size[n] = s->size;
+        n++;
+        s->occupied = 0;
+        ro->seq_count--;
+        ro->seq_next++;
+    }
+    pthread_mutex_unlock(&ro->lock);
+
+    for (unsigned i = 0; i < n; i++)
+        tun_write(tun_fd, out_data[i], out_size[i]);
+
+    pthread_mutex_unlock(&ro->flush_lock);
+}
+
+/* How long mud_worker_loop() may sleep in poll(): the idle cadence
+ * (`idle_ms`) normally, but no longer than until the earlier of the two
+ * buffers' (mud_reorder_flush()'s and mud_seq_flush()'s) next pending
+ * release -- so a held packet leaves at its deadline (rounded up to the
+ * next millisecond, poll()'s resolution) instead of waiting for the next
+ * unrelated packet or the idle timeout to give some worker a reason to wake
+ * up and flush. Without this a sparse flow's held packets were released one
+ * packet-gap late (or up to the 100ms idle timeout late), regardless of how
+ * small the hold was. A worker that just inserted a packet always passes
+ * through here again before its next poll(), so a new deadline is never
+ * missed. */
+static int
+mud_reorder_poll_timeout(struct mud *mud, int idle_ms)
+{
+    if (!mud->conf.reorder_window)
+        return idle_ms;
+
+    struct mud_reorder *ro = &mud->reorder;
+
+    pthread_mutex_lock(&ro->lock);
+    uint64_t next = ro->next_deadline;
+
+    if (!next || (ro->seq_next_deadline && ro->seq_next_deadline < next))
+        next = ro->seq_next_deadline;
+    pthread_mutex_unlock(&ro->lock);
+
+    if (!next)
+        return idle_ms;
+
+    const uint64_t now = mud_now(mud);
+
+    if (now >= next)
+        return 0;
+
+    const uint64_t wait_ms = (next - now + MUD_ONE_MSEC - 1) / MUD_ONE_MSEC;
+
+    return (wait_ms < (uint64_t)idle_ms) ? (int)wait_ms : idle_ms;
 }
 
 /* One thread's full packet-processing loop -- see the extended comment on
@@ -3053,8 +3610,9 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
             n++;
         }
         /* Bounded so *quit is rechecked promptly even with nothing to do,
-         * same idle cadence bind.c's old event loop used. */
-        const int pret = poll(fds, n, 100);
+         * same idle cadence bind.c's old event loop used -- and shortened
+         * to the reorder buffer's next release time when one is pending. */
+        const int pret = poll(fds, n, mud_reorder_poll_timeout(mud, 100));
 
         if (pret == -1) {
             if (errno == EINTR)
@@ -3063,11 +3621,13 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
             break;
         }
         if (pret == 0) {
-            /* Nothing ready this cycle -- still give the reorder buffer
+            /* Nothing ready this cycle -- still give both reorder buffers
              * (if enabled) a chance to release anything that's timed out
-             * while traffic went quiet; see mud_reorder_flush()'s timeout
-             * backstop. A no-op when reorder_window is 0. */
+             * while traffic went quiet; see mud_reorder_flush()'s and
+             * mud_seq_flush()'s own timeout backstop. A no-op when
+             * reorder_window is 0. */
             mud_reorder_flush(mud, tun_fd, tun_write);
+            mud_seq_flush(mud, tun_fd, tun_write);
             continue;
         }
 
@@ -3175,6 +3735,22 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
          * (unlike the old shared-poll design) because socket partitioning
          * above guarantees no other thread is waiting on this same fd. */
         for (unsigned int k = 1; k < n; k++) {
+            /* A connected socket (see mud_path_promote()) whose peer has
+             * gone away -- restarted process, changed source port -- gets
+             * an ICMP "port unreachable" from the kernel, which sits on
+             * the socket as a pending error and makes poll() report
+             * POLLERR immediately, every time, until something consumes
+             * it. Nothing here ever read such a socket (POLLIN isn't set
+             * for it), so its owning worker spun at 100% CPU forever.
+             * Reading SO_ERROR clears it. The error itself needs no other
+             * handling: the path just stops answering and times out the
+             * usual way. */
+            if (fds[k].revents & POLLERR) {
+                int err = 0;
+                socklen_t errlen = sizeof(err);
+
+                getsockopt(fds[k].fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
+            }
             if (!(fds[k].revents & POLLIN))
                 continue;
 
@@ -3187,12 +3763,27 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
             for (int j = 0; j < rx_n; j++) {
                 struct mud_rx_slot *rs = &scratch->rx[j];
                 uint64_t path_hold;
+                int stamped;
+                uint32_t seq = 0;
                 const int wn = mud_recv_finish(mud, sock_index, &rs->msg,
                                                &rs->remote, rs->packet,
                                                rs->len, out, sizeof(out),
-                                               &path_hold);
+                                               &path_hold, &stamped, &seq);
                 if (wn <= 0)
                     continue;
+
+                /* Carries a sequence number: released strictly in sequence
+                 * (waiting only for a genuinely missing predecessor), not
+                 * by the RTT-derived hold below. Anything the buffer can't
+                 * take -- late, full, oversized, or resequencing off -- goes
+                 * straight to TUN. */
+                if (stamped) {
+                    if (!mud->conf.reorder_window ||
+                        !mud_seq_insert(mud, seq, path_hold, mud_now(mud),
+                                        out, (size_t)wn))
+                        tun_write(tun_fd, out, (size_t)wn);
+                    continue;
+                }
 
                 /* Reordering (mud_conf.reorder_window) is opt-in and off
                  * by default -- when disabled this is exactly the
@@ -3208,9 +3799,10 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
                     tun_write(tun_fd, out, (size_t)wn);
             }
         }
-        /* Deliver anything in the reorder buffer that's ready after this
+        /* Deliver anything in either reorder buffer that's ready after this
          * iteration's RX work -- a no-op when reorder_window is 0. */
         mud_reorder_flush(mud, tun_fd, tun_write);
+        mud_seq_flush(mud, tun_fd, tun_write);
     }
     free(scratch);
     return ret;

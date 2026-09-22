@@ -124,7 +124,32 @@ struct mud_conf {
      * to use more of a multipath tunnel's combined throughput. See
      * "Packet resequencing" in docs/architecture.md. Only mud_worker_loop()
      * honors this -- the single-packet mud_recv()/mud_send() API is
-     * unaffected, by design (see mud_worker_loop's own doc comment). */
+     * unaffected, by design (see mud_worker_loop's own doc comment).
+     *
+     * Sequence-numbered resequencing: setting this also tells the peer
+     * (in every control message) that we want sequence numbers. A peer that
+     * understands the request then appends a 4-byte number to the data
+     * packets it sends us -- inside the encrypted payload, from a start
+     * time it announces in its own clock, so both ends always agree which
+     * packets carry one -- and we release those strictly in number order,
+     * waiting only for a number that is actually missing (at most this
+     * window, and normally just the arrival path's reorder_hold plus a few
+     * ms, then it is given up as lost). An in-order packet is never delayed,
+     * so a lone packet on the fast path keeps the fast path's latency, and
+     * back-to-back bursts come out in order, which the RTT-derived hold
+     * alone cannot guarantee. Nothing is stamped toward a peer that has not
+     * asked (reorderwindow off, or an older build), and packets from such a
+     * peer are still resequenced by the RTT-derived hold as before. Each
+     * direction is independent, like the option itself. Stamped packets are
+     * 4 bytes longer than the path's nominal MTU allows for.
+     *
+     * A packet is only stamped if its inner protocol isn't TCP (see
+     * mud_is_tcp() in mud.c) -- TCP already carries its own sequence
+     * numbers and reordering tolerance, and testing found this tunnel's own
+     * strict ordering measurably hurts TCP throughput despite fixing the
+     * false-retransmit problem resequencing exists for in the first place.
+     * A TCP packet still gets the RTT-derived hold, just not the stricter
+     * (and for TCP, counterproductive) sequence-number treatment. */
     uint64_t reorder_window;
 };
 
@@ -246,7 +271,10 @@ struct mud_path {
                              * this specific path might still need to wait
                              * for an earlier-sent packet on that slower
                              * path to arrive. Zero for the slowest path
-                             * itself (or when reorder_window is off).
+                             * itself (or when reorder_window is off), and
+                             * zero for any path within ~0.5ms of it --
+                             * below that is RTT measurement noise, not a
+                             * real path difference.
                              * Used by mud_reorder_insert() (see mud.c) so
                              * held duration adapts to each path's real
                              * measured RTT instead of one flat delay
