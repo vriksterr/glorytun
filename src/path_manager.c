@@ -96,6 +96,14 @@ gt_path_manager_update_conf(struct gt_managed_path *path,
         path->desired_conf.rx_max_rate = conf->rx_max_rate;
     if (conf->mtu)
         path->desired_conf.mtu = conf->mtu;
+    if (conf->monitor)
+        path->desired_conf.monitor = 1;
+    if (conf->probe_interval)
+        path->desired_conf.probe_interval = conf->probe_interval;
+    if (conf->probe_window)
+        path->desired_conf.probe_window = conf->probe_window;
+    if (conf->probe_recover)
+        path->desired_conf.probe_recover = conf->probe_recover;
     path->config_dirty = 1;
 }
 

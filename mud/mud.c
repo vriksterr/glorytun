@@ -81,6 +81,30 @@
 #define MUD_MSG_MARK(X)  ((X) | UINT64_C(1))
 #define MUD_MSG_SENT_MAX (5)
 
+/* Probe-based path health (see the section comment above mud_probe_send()).
+ * Defaults used when a monitor path's own conf.probe_interval/probe_window/
+ * probe_recover is left at 0 (unset). probe_window is a sample *count*, not
+ * a duration -- at the default 1-second interval the two happen to match,
+ * but a user who shortens probe_interval keeps the same statistical
+ * smoothing (60 samples) unless they also raise probe_window. Both
+ * probe_window and (probe_recover / probe_interval) are clamped to
+ * MUD_PROBE_RING_SIZE -- see its own comment. */
+#define MUD_PROBE_INTERVAL_DEFAULT (MUD_ONE_SEC)
+#define MUD_PROBE_WINDOW_DEFAULT   (60U)
+#define MUD_PROBE_RECOVER_DEFAULT  (60 * MUD_ONE_SEC)
+
+/* Trailing block appended to a monitor path's own control message, after
+ * struct mud_msg and (always, whether or not it's actually in use --
+ * see mud_send_msg()) the MUD_SEQ_EXT_SIZE gap the sequence-numbering
+ * feature uses at that same fixed offset: just the sender's next probe
+ * sequence number. Reuses struct mud_msg wholesale rather than inventing a
+ * new wire message type -- same pattern as the sequence-numbering
+ * extension just above, for the same reason: a build that predates this
+ * feature (or a path that isn't a monitor) never writes or looks at these
+ * bytes, so nothing about the existing control-message format, its size
+ * checks, or its decrypt path needs to change. */
+#define MUD_PROBE_EXT_SIZE (4U)
+
 #define MUD_PKT_MIN_SIZE (MUD_TIME_SIZE + MUD_MAC_SIZE)
 #define MUD_PKT_MAX_SIZE MUD_MTU_HARD_MAX
 
@@ -141,9 +165,18 @@ struct mud_msg {
     unsigned char beat[MUD_TIME_SIZE];
     unsigned char mtu[2];
     unsigned char pref;
-    unsigned char loss;
     unsigned char fixed_rate;
     unsigned char loss_limit;
+    /* Probe-based path health (see "Probe-based path health" above
+     * mud_probe_loss_255()). Propagated the same way as pref/loss_limit/
+     * beat above (see mud_recv_msg()'s tx_time==0 branch) so a passively
+     * discovered path picks up "this is a monitor path" and the interval
+     * to expect it on from the active side automatically -- unlike
+     * probe_window/probe_recover (mud_path_conf's own fields), which stay
+     * local to whichever side computes that side's own probe_degraded and
+     * don't need to match to be individually correct. */
+    unsigned char monitor;
+    unsigned char probe_interval[MUD_TIME_SIZE];
     struct mud_addr addr;
 };
 
@@ -379,38 +412,53 @@ struct mud_reorder {
                                  * mud_reorder_flush() */
 };
 
-/* Pooled loss/RTT state for every path sharing one physical link -- see
- * struct mud_path's group_tx_loss/group_rx_loss/group_rtt fields (mud.h) for
- * the full rationale. Identity fields mirror mud_path_same_group()'s own
- * comparison exactly (see mud_group_get()), snapshotted once when the group
- * is first created rather than read live off some "representative" member
- * path -- so the group's identity, and the rolling loss trackers below it,
- * survive regardless of which specific member paths come and go over the
- * tunnel's lifetime. Found/created via linear scan (mud_group_get()): the
- * number of distinct physical links on one tunnel is small (a handful at
- * most -- this is bounded by real WAN interfaces, not by connections N or
- * sub-flow count), so this costs nothing next to the O(paths^2)
- * select_weight computation this file already does every tick. */
+/* Pooled RTT/probe-health state for every path sharing one physical link --
+ * see struct mud_path's group_rtt field (mud.h) for the full rationale.
+ * Identity fields mirror mud_path_same_group()'s own comparison exactly
+ * (see mud_group_get()), snapshotted once when the group is first created
+ * rather than read live off some "representative" member path -- so the
+ * group's identity survives regardless of which specific member paths come
+ * and go over the tunnel's lifetime. Found/created via linear scan
+ * (mud_group_get()): the number of distinct physical links on one tunnel is
+ * small (a handful at most -- this is bounded by real WAN interfaces, not
+ * by connections N or sub-flow count), so this costs nothing next to the
+ * O(paths^2) select_weight computation this file already does every tick.
+ * This used to also pool byte-counter tx-loss/rx-loss across a group's
+ * members (tx_loss/rx_loss/tx_loss_pub/rx_loss_pub/tx_loss_live_pub/
+ * rx_loss_live_pub) -- removed entirely along with the rest of that
+ * mechanism, since `monitor` is mandatory on every path now and
+ * probe_degraded below is the only loss/health signal anything reads. */
 struct mud_group {
     int active;
     unsigned int local_ifindex;
     union mud_sockaddr local;
     union mud_sockaddr remote;
-    struct mud_loss_track tx_loss, rx_loss; /* fed by mud_recv_msg(), one
-                                 * event per successful message from ANY
-                                 * member path -- never touched by a stuck
-                                 * member's silence, only ever advanced by
-                                 * whichever member(s) actually report */
-    uint64_t tx_loss_pub, rx_loss_pub;           /* rolling, 0-255 scale,
-                                 * same meaning/scale as struct mud_path's
-                                 * own tx.loss/rx.loss */
-    uint64_t tx_loss_live_pub, rx_loss_live_pub; /* most recently closed 1s
-                                 * bucket, pooled the same way */
     /* Transient: reset and recomputed from scratch every mud_update() tick
      * (see the group pass there), not meaningful between ticks the way the
      * rolling trackers above are. */
     uint64_t rtt_sum;
     unsigned rtt_count;
+    /* Probe-based path health (see "Probe-based path health" below and
+     * struct mud_path's own `probe` member). Populated from whichever of
+     * this group's members has conf.monitor set -- at most one is expected
+     * in practice, but nothing enforces that; the most recently processed
+     * one wins, harmlessly, since a second would be redundant anyway.
+     * mud_path_update()'s loss_limit/MUD_LOSSY check reads probe_degraded
+     * directly (not probe_loss_pub) once probe_has_monitor is set, so the
+     * fast-degrade/slow-recover hysteresis lives here, computed once,
+     * rather than re-derived by every member on every tick. */
+    int probe_has_monitor;   /* 1 once this group has a monitor path that has
+                                 sent or received at least one probe */
+    uint64_t probe_loss_pub; /* 0-255 scale, display/diagnostic only --
+                                 the *decision* is probe_degraded below */
+    int probe_degraded;      /* current latched state: fast to set (the
+                                 instant probe_loss_pub crosses loss_limit),
+                                 slow to clear (see probe_good_since) */
+    uint64_t probe_good_since; /* mud_now() marking the start of the current
+                                 unbroken under-threshold stretch; 0 while
+                                 at/over threshold. Clears probe_degraded
+                                 once now - probe_good_since >= the
+                                 monitor's own configured probe_recover. */
 };
 
 struct mud {
@@ -655,7 +703,13 @@ mud_select_path(struct mud *mud, uint16_t cursor)
     for (unsigned i = 0; i < mud->capacity; i++) {
         struct mud_path *path = &mud->paths[i];
 
-        if (path->status != MUD_RUNNING)
+        /* A monitor path (see struct mud_path_conf's own comment) can
+         * legitimately reach MUD_RUNNING -- it still exchanges ordinary
+         * control messages, same status machine as any other path -- but
+         * must never carry a data packet regardless: that's the whole
+         * point of keeping it separate from the sub-flows actually doing
+         * the work it's measuring. */
+        if (path->status != MUD_RUNNING || path->conf.monitor)
             continue;
 
         if (k < path->select_weight)
@@ -873,8 +927,9 @@ mud_group_get(struct mud *mud, struct mud_path *path)
         if (!mud_cmp_addr(&path->conf.remote, &grp->remote))
             return grp;
     }
-    if (!free_slot)
+    if (!free_slot) {
         return NULL;
+    }
 
     free_slot->active = 1;
     free_slot->local_ifindex = path->conf.local_ifindex;
@@ -1800,6 +1855,24 @@ mud_send_msg(struct mud *mud, struct mud_path *path, uint64_t now,
         mud_store(ext + 1, seq_start, MUD_TIME_SIZE);
     }
 
+    /* Probe sequence number for a monitor path (see "Probe-based path
+     * health" above MUD_PROBE_INTERVAL_DEFAULT). Always placed right after
+     * the MUD_SEQ_EXT_SIZE gap, whether or not the sequence-numbering block
+     * above actually wrote anything into it -- src[] starts zeroed, so an
+     * inactive gap here is just harmless padding, and both this sender and
+     * the receiver agree on a fixed offset regardless of reorder_window
+     * state instead of one extension's presence shifting the other's
+     * position. */
+    if (path->conf.monitor) {
+        const size_t need = MUD_PKT_MIN_SIZE + sizeof(struct mud_msg) +
+                            MUD_SEQ_EXT_SIZE + MUD_PROBE_EXT_SIZE;
+        unsigned char *ext = src + sizeof(struct mud_msg) + MUD_SEQ_EXT_SIZE;
+
+        if (size < need)
+            size = need;
+        mud_store32(ext, path->probe.tx_next++);
+    }
+
     mud_store(dst, MUD_MSG_MARK(now), MUD_TIME_SIZE);
     MUD_STORE_MSG(msg->sent_time, sent_time);
 
@@ -1825,10 +1898,13 @@ mud_send_msg(struct mud *mud, struct mud_path *path, uint64_t now,
     MUD_STORE_MSG(msg->max_rate, path->conf.rx_max_rate);
     MUD_STORE_MSG(msg->beat, path->conf.beat);
 
-    msg->loss = (unsigned char)path->tx.loss;
     msg->pref = path->conf.pref;
     msg->fixed_rate = path->conf.fixed_rate;
     msg->loss_limit = path->conf.loss_limit;
+    msg->monitor = path->conf.monitor;
+    MUD_STORE_MSG(msg->probe_interval, path->conf.probe_interval
+                                      ? path->conf.probe_interval
+                                      : MUD_PROBE_INTERVAL_DEFAULT);
 
     const struct mud_crypto_opt opt = {
         .dst = dst,
@@ -1862,149 +1938,21 @@ mud_decrypt_msg(struct mud *mud,
     return size;
 }
 
-/* Feed a freshly observed (sent_pkt, recv_pkt) delta into a per-direction
- * loss tracker. Buckets by 1-second wall-clock boundaries: whichever call
- * happens to land at/after a full second closes the in-progress bucket,
- * publishes it as *loss_live (this second's own ratio -- the real-time
- * status-page value), and folds it into a 60-slot ring so *loss reflects
- * the combined counts of the last (up to) 60 closed buckets -- a true
- * rolling 60-second window, not 60 independently-decaying estimates. This
- * is what loss_limit/MUD_LOSSY reads, so a single bad second cannot flip a
- * path to degraded/lossy on its own; sustained loss across the window can.
- *
- * `traffic_idle` means no real tunneled traffic (only keepalive chatter)
- * has moved on this path in the last second. A quiet link only exchanges
- * one tracking message every `keepalive` (25s default), so a 1-second
- * bucket built from that would almost always hold a single packet -- one
- * dropped keepalive then reads as 100% loss out of nowhere. Rather than
- * publish that noise, we don't touch loss/loss_live at all while idle and
- * discard whatever partial bucket was left over from just before things
- * went quiet, so the next active stretch starts from a clean sample. */
 static void
-mud_update_loss(struct mud_loss_track *track, uint64_t now, int traffic_idle,
-                uint64_t *loss, uint64_t *loss_live,
-                uint64_t sent_pkt, uint64_t recv_pkt)
+mud_update_rl(struct mud_path *path, uint64_t tx_dt, uint64_t tx_bytes,
+              uint64_t rx_dt, uint64_t rx_bytes)
 {
-    if (traffic_idle) {
-        /* Real time keeps passing while idle, and the 60-second window
-         * this ring tracks needs to age accordingly -- otherwise a path
-         * that flips in and out of idle (routine for one sub-flow of a
-         * multipath bond, whose share of real traffic varies second to
-         * second) has its ring's rotation paused every time it goes
-         * quiet, freezing whatever old sum it last held. Age it by one
-         * empty (0 sent, 0 recv) bucket per elapsed second instead of
-         * leaving it untouched -- truthful, since no data moved during
-         * that time, and it correctly dilutes/evicts old samples exactly
-         * as if the path had gone on sending zero packets each second
-         * rather than stopping the clock.
-         *
-         * Deliberately does NOT reset bucket_time to 0 the way the old
-         * code did (and an earlier version of this fix still did) --
-         * that destroys the only reference point available to measure
-         * *further* elapsed idle time from, so aging would fire at most
-         * once (draining however few seconds had elapsed at that first
-         * instant, often just one) and then never again no matter how
-         * much longer the path stayed idle. Confirmed live with
-         * instrumented builds: sum_sent/sum_recv stayed stuck nonzero
-         * indefinitely with bucket_time pinned at 0 on every subsequent
-         * idle tick, silently skipping this whole block forever. Instead,
-         * bucket_time is only ever advanced here by the whole seconds
-         * just consumed, so the next tick (typically ~100ms later, well
-         * under a second) naturally accumulates toward the next
-         * whole-second threshold instead of losing its reference point.
-         * Capped at MUD_LOSS_SAMPLES: past a full window's worth of idle
-         * time every old sample has already aged out. */
-        if (!track->bucket_time) {
-            track->bucket_time = now;
-        } else {
-            uint64_t idle_secs = MUD_TIME_MASK(now - track->bucket_time)
-                                / MUD_ONE_SEC;
-
-            if (idle_secs) {
-                if (idle_secs > MUD_LOSS_SAMPLES)
-                    idle_secs = MUD_LOSS_SAMPLES;
-
-                for (uint64_t i = 0; i < idle_secs; i++) {
-                    track->sum_sent -= track->sample_sent[track->next];
-                    track->sum_recv -= track->sample_recv[track->next];
-                    track->sample_sent[track->next] = 0;
-                    track->sample_recv[track->next] = 0;
-                    track->next = (track->next + 1) % MUD_LOSS_SAMPLES;
-                }
-                *loss = (track->sum_sent && track->sum_sent >= track->sum_recv)
-                      ? (track->sum_sent - track->sum_recv) * 255U
-                           / track->sum_sent
-                      : 0;
-                track->bucket_time = now;
-            }
-        }
-        track->bucket_sent = 0;
-        track->bucket_recv = 0;
-        return;
-    }
-
-    if (!track->bucket_time)
-        track->bucket_time = now;
-
-    track->bucket_sent += sent_pkt;
-    track->bucket_recv += recv_pkt;
-
-    if (MUD_TIME_MASK(now - track->bucket_time) < MUD_ONE_SEC)
-        return;
-
-    if (track->bucket_sent)
-        *loss_live = (track->bucket_sent >= track->bucket_recv)
-                   ? (track->bucket_sent - track->bucket_recv) * 255U
-                        / track->bucket_sent
-                   : 0;
-
-    track->sum_sent -= track->sample_sent[track->next];
-    track->sum_recv -= track->sample_recv[track->next];
-    track->sample_sent[track->next] = track->bucket_sent;
-    track->sample_recv[track->next] = track->bucket_recv;
-    track->sum_sent += track->bucket_sent;
-    track->sum_recv += track->bucket_recv;
-    track->next = (track->next + 1) % MUD_LOSS_SAMPLES;
-
-    if (track->sum_sent)
-        *loss = (track->sum_sent >= track->sum_recv)
-              ? (track->sum_sent - track->sum_recv) * 255U / track->sum_sent
-              : 0;
-
-    track->bucket_time = now;
-    track->bucket_sent = 0;
-    track->bucket_recv = 0;
-}
-
-static void
-mud_update_rl(struct mud *mud, struct mud_path *path, uint64_t now,
-              uint64_t tx_dt, uint64_t tx_bytes, uint64_t tx_pkt,
-              uint64_t rx_dt, uint64_t rx_bytes, uint64_t rx_pkt)
-{
+    /* Byte-counter tx-loss tracking used to live in this branch -- removed
+     * entirely (not just skipped): with `monitor` mandatory on every path
+     * (see "Probe-based path health" above mud_probe_loss_255()), nothing
+     * ever reads it again, and computing a number nothing consults costs
+     * real cycles on every single control message for no benefit. Rate
+     * adaptation below is unrelated to loss tracking and always runs
+     * regardless -- unchanged. */
     if (rx_dt && rx_dt > tx_dt + (tx_dt >> 3)) {
         if (!path->conf.fixed_rate)
             path->tx.rate = (7 * rx_bytes * MUD_ONE_SEC) / (8 * rx_dt);
     } else {
-        mud_update_loss(&path->msg.tx_loss, now, path->traffic_idle,
-                        &path->tx.loss, &path->tx.loss_live,
-                        tx_pkt, rx_pkt);
-
-        /* Same event, same deltas, also folded into this path's physical-
-         * link group (see struct mud_group's own comment) -- fed here
-         * rather than duplicating mud_update_rl()'s own gating logic
-         * elsewhere. idle=0: this call only happens because a fresh message
-         * just arrived, which is itself proof the group isn't idle this
-         * instant; the group's own idle-aging (mirroring what
-         * mud_path_track() already does per path) is handled once per tick
-         * in mud_update() instead, from a fresher, tick-level view of every
-         * member at once. */
-        struct mud_group *grp = mud_group_get(mud, path);
-
-        if (grp)
-            mud_update_loss(&grp->tx_loss, now, 0,
-                            &grp->tx_loss_pub, &grp->tx_loss_live_pub,
-                            tx_pkt, rx_pkt);
-
         if (!path->conf.fixed_rate)
             path->tx.rate += path->tx.rate / 10;
     }
@@ -2029,6 +1977,137 @@ mud_update_stat(struct mud_stat *stat, const uint64_t val)
         stat->var = val >> 1;
         stat->val = val;
     }
+}
+
+/* Probe-based path health: how mud_path_update() decides whether a physical
+ * link is healthy. This tunnel used to also infer loss from byte counters
+ * riding on data-driven traffic (tx-loss/rx-loss) as a fallback for groups
+ * with no monitor configured; that mechanism -- and the fallback -- have
+ * been removed entirely, since `monitor` is mandatory on every path now
+ * (see glorytun-notes.html's "Probe-based path health" section for the full
+ * history, including what that byte-counter mechanism's inherently variable
+ * timing caused in practice -- beat cadence backs off when idle, echoed
+ * totals lag a round trip, multiple sub-flows' catch-up events can land in
+ * the same pooled bucket). A monitor path (see struct mud_path_conf's own
+ * `monitor` field) sends a tiny sequence-numbered probe on a genuinely
+ * fixed interval, and each side independently counts gaps in what it
+ * *receives* -- no echo, no round trip, no dependency on real data traffic
+ * existing at all. Reuses struct mud_msg wholesale as the carrier (see
+ * MUD_PROBE_EXT_SIZE above) purely to avoid a second wire format; the loss
+ * unit here is "how many of the last N sequence numbers arrived", not
+ * bytes. */
+
+/* Recomputes the current loss fraction (0-255 scale, same convention as
+ * every other loss figure in this file) directly from path->probe.seen[],
+ * looking back `window` sequence numbers from the next-expected one. Cheap
+ * (at most MUD_PROBE_RING_SIZE iterations, and window is clamped to that)
+ * and deliberately recomputed from scratch on every call rather than
+ * incrementally maintained -- there is no hot path here to protect (a probe
+ * arrives on the order of once a second, not once a packet), and computing
+ * it fresh means there is no separate running-total invariant that could
+ * ever drift out of sync with the ring it's supposedly summarizing. */
+static unsigned
+mud_probe_loss_255(struct mud_path *path, unsigned window)
+{
+    if (!window || window > MUD_PROBE_RING_SIZE)
+        window = MUD_PROBE_WINDOW_DEFAULT;
+
+    const unsigned actual = (path->probe.rx_next < window)
+                           ? path->probe.rx_next : window;
+    if (!actual)
+        return 0;
+
+    unsigned missed = 0;
+
+    for (unsigned i = 0; i < actual; i++) {
+        const uint32_t seq = path->probe.rx_next - 1 - i;
+
+        if (!path->probe.seen[seq % MUD_PROBE_RING_SIZE])
+            missed++;
+    }
+    return missed * 255U / actual;
+}
+
+/* Publishes `loss255` onto this path's group and updates the fast-degrade/
+ * slow-recover latch mud_path_update() reads (see struct mud_group's own
+ * comment on probe_degraded). Called both from mud_probe_recv() below (a
+ * genuine probe just arrived) and from mud_path_track()'s per-tick check
+ * (a monitor path has gone completely silent, not just lossy -- see that
+ * call site's own comment for why the ring alone can't catch that case). */
+static void
+mud_probe_publish(struct mud *mud, struct mud_path *path, uint64_t now,
+                  unsigned loss255)
+{
+    struct mud_group *grp = mud_group_get(mud, path);
+
+    if (!grp)
+        return;
+
+    grp->probe_has_monitor = 1;
+    grp->probe_loss_pub = loss255;
+
+    if (loss255 > path->conf.loss_limit) {
+        grp->probe_degraded = 1;
+        grp->probe_good_since = 0;
+        return;
+    }
+    if (!grp->probe_good_since)
+        grp->probe_good_since = now;
+
+    if (grp->probe_degraded) {
+        const uint64_t recover = path->conf.probe_recover
+                                ? path->conf.probe_recover
+                                : MUD_PROBE_RECOVER_DEFAULT;
+
+        if (mud_timeout(now, grp->probe_good_since, recover))
+            grp->probe_degraded = 0;
+    }
+}
+
+/* Feeds one freshly received probe sequence number into path->probe (see
+ * its own comment in mud.h). Three cases: the very first probe this path
+ * has ever seen (adopt it as the baseline -- handles a peer that started
+ * after this side did, same spirit as mud_get_path()'s own passive-path
+ * handling); a plain gap-free or reordered-but-still-in-window arrival
+ * (mark it seen, marking anything skipped over as missed); or a gap/
+ * reversal too large to be routine reordering, which can only mean the
+ * peer restarted its own counter from zero -- resynced the same as the
+ * first-ever case, rather than either reading a restarted peer's small
+ * seq as an enormous multi-hundred-slot loss or leaving stale pre-restart
+ * history mixed into the window. */
+static void
+mud_probe_recv(struct mud *mud, struct mud_path *path, uint64_t now,
+               uint32_t seq)
+{
+    if (!path->probe.rx_sync) {
+        path->probe.rx_sync = 1;
+        memset(path->probe.seen, 0, sizeof(path->probe.seen));
+        path->probe.seen[seq % MUD_PROBE_RING_SIZE] = 1;
+        path->probe.rx_next = seq + 1;
+    } else if (seq + 1 == path->probe.rx_next) {
+        /* replay of the most recent one -- nothing new to record */
+    } else if (seq < path->probe.rx_next &&
+               path->probe.rx_next - seq <= MUD_PROBE_RING_SIZE) {
+        /* late/reordered arrival still within the window: correct its slot
+         * from "missed" to "seen" rather than leaving a false gap */
+        path->probe.seen[seq % MUD_PROBE_RING_SIZE] = 1;
+    } else if (seq >= path->probe.rx_next &&
+               seq - path->probe.rx_next < MUD_PROBE_RING_SIZE) {
+        for (uint32_t s = path->probe.rx_next; s != seq; s++)
+            path->probe.seen[s % MUD_PROBE_RING_SIZE] = 0;
+        path->probe.seen[seq % MUD_PROBE_RING_SIZE] = 1;
+        path->probe.rx_next = seq + 1;
+    } else {
+        memset(path->probe.seen, 0, sizeof(path->probe.seen));
+        path->probe.seen[seq % MUD_PROBE_RING_SIZE] = 1;
+        path->probe.rx_next = seq + 1;
+    }
+    path->probe.rx_last = now;
+
+    const unsigned window = path->conf.probe_window
+                           ? (unsigned)path->conf.probe_window : 0;
+
+    mud_probe_publish(mud, path, now, mud_probe_loss_255(path, window));
 }
 
 static void
@@ -2078,6 +2157,22 @@ mud_recv_msg(struct mud *mud, struct mud_path *path,
         }
     }
 
+    /* Probe sequence number (see MUD_PROBE_EXT_SIZE and "Probe-based path
+     * health" above mud_probe_loss_255()) -- always at this fixed offset
+     * regardless of whether the sequence-numbering block just above is
+     * actually in use, same reasoning as mud_send_msg()'s own write side.
+     * Only meaningful, and only ever sent, on a path configured `monitor`
+     * on at least one end; a plain data/beat sub-flow's peer never writes
+     * anything here, so this simply never fires for one. */
+    if (path->conf.monitor &&
+        size - MUD_PKT_MIN_SIZE >=
+            sizeof(struct mud_msg) + MUD_SEQ_EXT_SIZE + MUD_PROBE_EXT_SIZE) {
+        const unsigned char *ext = data + sizeof(struct mud_msg) +
+                                   MUD_SEQ_EXT_SIZE;
+
+        mud_probe_recv(mud, path, now, mud_load32(ext));
+    }
+
     if (tx_time) {
         mud_update_stat(&path->rtt, MUD_TIME_MASK(now - tx_time));
 
@@ -2100,8 +2195,9 @@ mud_recv_msg(struct mud *mud, struct mud_path *path,
         if (tx_time >= path->created)
             path->confirmed_live = 1;
 
-        /* tx_total/rx_total (packet counts, used below only for the tx-loss
-         * delta fed to mud_update_rl()) must also be checked here, not just
+        /* tx_total/rx_total (packet counts, used below only to gate the
+         * mud_update_rl() rate-adaptation call and the baseline updates
+         * that follow it) must also be checked here, not just
          * tx_bytes/rx_bytes -- confirmed live in production: they are NOT
          * guaranteed to move together. tx_total in particular arrives via
          * an echo (msg->fw.total, the peer's own re-transmission of an
@@ -2115,28 +2211,29 @@ mud_recv_msg(struct mud *mud, struct mud_path *path,
          * happen to look forward-moving, used to pass this guard anyway --
          * and every field below is unsigned, so `tx_total -
          * path->msg.tx.total` doesn't go negative, it wraps to a number
-         * near UINT64_MAX. Fed into mud_update_rl() as this path's "sent"
-         * count against a real, small "received" count, that reads as
-         * ~100% loss for one window, sitting in the rolling tracker until
-         * it ages out ~60 seconds later -- confirmed live: multiple
-         * sub-flows, and both group figures pooling them, spiking to
-         * ~99% loss for minutes at a time in production despite the
-         * tunnel otherwise working normally throughout. The rx-loss check
-         * elsewhere in this function already guards both of its own two
-         * fields (peer_tx_total and peer_tx_bytes) for exactly this
-         * reason; this one only ever checked one of its two. */
+         * near UINT64_MAX. Back when this fed the now-removed byte-counter
+         * tx-loss tracker as this path's "sent" count against a real, small
+         * "received" count, that used to read as ~100% loss for one window,
+         * sitting in the rolling tracker until it aged out ~60 seconds
+         * later -- confirmed live: multiple sub-flows, and both group
+         * figures pooling them, spiking to ~99% loss for minutes at a time
+         * in production despite the tunnel otherwise working normally
+         * throughout. The removed rx-loss check used to guard both of its
+         * own two fields (peer_tx_total and peer_tx_bytes) for exactly this
+         * reason; this one only ever checked one of its two -- fixed here
+         * regardless of that tracker's later removal, since the guard below
+         * still needs both totals to move forward before trusting them for
+         * the baseline updates and the rate-adaptation call. */
         if ((tx_time > path->msg.tx.time) && (tx_bytes > path->msg.tx.bytes) &&
             (tx_total > path->msg.tx.total) &&
             (rx_time > path->msg.rx.time) && (rx_bytes > path->msg.rx.bytes) &&
             (rx_total > path->msg.rx.total)) {
             if (path->msg.set && path->status > MUD_PROBING) {
-                mud_update_rl(mud, path, now,
+                mud_update_rl(path,
                         MUD_TIME_MASK(tx_time - path->msg.tx.time),
                         tx_bytes - path->msg.tx.bytes,
-                        tx_total - path->msg.tx.total,
                         MUD_TIME_MASK(rx_time - path->msg.rx.time),
-                        rx_bytes - path->msg.rx.bytes,
-                        rx_total - path->msg.rx.total);
+                        rx_bytes - path->msg.rx.bytes);
             }
             path->msg.tx.time = tx_time;
             path->msg.rx.time = rx_time;
@@ -2145,41 +2242,11 @@ mud_recv_msg(struct mud *mud, struct mud_path *path,
             path->msg.tx.total = tx_total;
             path->msg.rx.total = rx_total;
             path->msg.set = 1;
-            path->msg.tx_seen = now;
         }
-        /* rx.loss: derived locally from the peer's own tx counters (sent in
-         * every message, no echo needed) against our own real rx counters,
-         * the same way tx.loss is derived from the peer's rx counters. Do
-         * not just copy msg->loss -- that is the peer's own computation of
-         * the same number and may disagree if the peer runs different or
-         * buggy loss-accounting logic. */
-        const uint64_t peer_tx_bytes = MUD_LOAD_MSG(msg->tx.bytes);
-        const uint64_t peer_tx_total = MUD_LOAD_MSG(msg->tx.total);
-
-        if ((peer_tx_total > path->msg.rxloss.peer_total) &&
-            (peer_tx_bytes > path->msg.rxloss.peer_bytes)) {
-            if (path->msg.rxloss.time && path->status > MUD_PROBING) {
-                mud_update_loss(&path->msg.rx_loss, now, path->traffic_idle,
-                                &path->rx.loss, &path->rx.loss_live,
-                                peer_tx_total - path->msg.rxloss.peer_total,
-                                path->rx.total - path->msg.rxloss.own_total);
-
-                /* Same event, also folded into the physical-link group --
-                 * see the matching comment beside mud_update_rl()'s own tx
-                 * feed. */
-                struct mud_group *grp = mud_group_get(mud, path);
-
-                if (grp)
-                    mud_update_loss(&grp->rx_loss, now, 0,
-                                    &grp->rx_loss_pub, &grp->rx_loss_live_pub,
-                                    peer_tx_total - path->msg.rxloss.peer_total,
-                                    path->rx.total - path->msg.rxloss.own_total);
-            }
-            path->msg.rxloss.peer_total = peer_tx_total;
-            path->msg.rxloss.peer_bytes = peer_tx_bytes;
-            path->msg.rxloss.own_total  = path->rx.total;
-            path->msg.rxloss.time = now;
-        }
+        /* Byte-counter rx-loss tracking used to live here -- removed
+         * entirely, same reasoning as the matching removal in
+         * mud_update_rl(): with `monitor` mandatory on every path, nothing
+         * ever reads it again. */
         path->msg.sent = 0;
 
         if (path->conf.state == MUD_PASSIVE)
@@ -2200,6 +2267,8 @@ mud_recv_msg(struct mud *mud, struct mud_path *path,
         }
         path->conf.pref = msg->pref;
         path->conf.loss_limit = msg->loss_limit;
+        path->conf.monitor = msg->monitor;
+        path->conf.probe_interval = MUD_LOAD_MSG(msg->probe_interval);
 
         /* An operator-set mtu (path up ... mtu N) always wins locally and
          * is never touched here -- mirrors how tx_pinned protects an
@@ -2543,23 +2612,16 @@ mud_path_update(struct mud *mud, struct mud_path *path, uint64_t now)
         path->status = MUD_DEGRADED;
         return 0;
     }
-    /* Read against the whole physical link's pooled loss (see struct
-     * mud_group's own comment), not just this one sub-flow's -- a single
-     * bad sub-flow no longer degrades on its own, and a whole link degrades
-     * and recovers together, both by design (see the "Group loss" section
-     * of glorytun-notes.html). mud_group_get() reads the group's currently
-     * published figures directly rather than through a once-per-tick
-     * mirrored copy, so this decision is never a tick stale on top of
-     * whatever the underlying rolling window itself already costs. Falls
-     * back to this path's own tx.loss/rx.loss only in the practically
-     * unreachable case of every group slot already being in use (see
-     * mud_group_get()'s own comment). */
+    /* Read against the whole physical link's pooled probe health (see
+     * struct mud_group's own comment on probe_degraded), not just this one
+     * sub-flow's -- a whole link degrades and recovers together, by design
+     * (see "Group loss" and "Probe-based path health" in glorytun-
+     * notes.html). `monitor` is mandatory on every path now, so a group
+     * with no monitor (misconfiguration) simply never goes LOSSY via this
+     * check -- there is no byte-counter fallback anymore. */
     struct mud_group *grp = mud_group_get(mud, path);
-    const uint64_t group_tx_loss = grp ? grp->tx_loss_pub : path->tx.loss;
-    const uint64_t group_rx_loss = grp ? grp->rx_loss_pub : path->rx.loss;
 
-    if (group_tx_loss > path->conf.loss_limit ||
-        group_rx_loss > path->conf.loss_limit) {
+    if (grp && grp->probe_has_monitor && grp->probe_degraded) {
         path->status = MUD_LOSSY;
         return 0;
     }
@@ -2618,66 +2680,59 @@ mud_path_update(struct mud *mud, struct mud_path *path, uint64_t now)
 static uint64_t
 mud_path_track(struct mud *mud, struct mud_path *path, uint64_t now)
 {
+    /* Still needed below (single-socket beat backoff) even though the
+     * byte-counter loss tracking that used to be the other consumer of
+     * this flag has been removed entirely -- `monitor` is mandatory on
+     * every path now (see "Probe-based path health" above
+     * mud_probe_loss_255()), so nothing tracks a byte-counter tx/rx loss
+     * figure at all anymore. */
     path->traffic_idle = mud_timeout(now, path->idle, MUD_ONE_SEC);
-
-    /* mud_update_loss()'s idle-aging branch (see its own comment) needs to
-     * be reached regularly and on a real clock for the ring it ages to
-     * ever fully drain a stale reading -- calling it here, once per
-     * mud_update() tick (~100ms), regardless of whether a message just
-     * arrived, is what provides that. Safe to call every tick: most calls
-     * see well under a second elapsed and do nothing (see that function's
-     * own bucket_time handling), only actually aging the ring once a
-     * whole second has genuinely passed. Confirmed live with an
-     * instrumented build: without this call site, tx-loss stayed stuck at
-     * its last real reading indefinitely, since mud_update_rl()'s own
-     * call to mud_update_loss() -- gated on the peer's reported byte
-     * counters increasing -- turned out to still fire regularly even with
-     * zero real data flowing (those raw counters include beat-message
-     * overhead, which keeps incrementing on its own), but always with
-     * traffic_idle already true at that point, so it landed in the same
-     * idle branch this does rather than the ring-rotating path -- neither
-     * call site draining anything without the fix below. */
-    if (path->traffic_idle) {
-        mud_update_loss(&path->msg.tx_loss, now, 1,
-                        &path->tx.loss, &path->tx.loss_live, 0, 0);
-        mud_update_loss(&path->msg.rx_loss, now, 1,
-                        &path->rx.loss, &path->rx.loss_live, 0, 0);
-    } else {
-        /* Real data is moving on this path (traffic_idle is false), but
-         * that says nothing about whether *this path's own* tx.loss/
-         * rx.loss have had anything fresh to compute from lately -- both
-         * only update when a message from the peer, on this exact
-         * sub-flow, successfully arrives with fresh counters (see
-         * mud_recv_msg()), and on a lossy link that can itself keep
-         * failing for a stretch by chance while real data still gets
-         * through often enough to keep traffic_idle false. Confirmed live
-         * on a real router: one sub-flow's rx-loss sat completely frozen
-         * for 25+ continuous seconds this way, on a path that was
-         * genuinely carrying traffic the whole time -- see "Group loss/
-         * RTT" in glorytun-notes.html. Age tx/rx independently (one can be
-         * stuck while the other isn't) once it's been more than
-         * MUD_MSG_SENT_MAX beats since the last one that actually landed
-         * -- the same threshold mud_path_update() already uses elsewhere
-         * to call a path unresponsive, so this fires only once a sub-flow
-         * is genuinely, not just momentarily, behind. Safe against the
-         * interference the equivalent group-level attempt hit (see that
-         * same section): unlike traffic_idle, which is true almost
-         * continuously for a beat-only exchange, "stuck for N beats" is
-         * true only while the event-driven feed genuinely isn't
-         * succeeding, so the two are never fighting over the same
-         * in-progress bucket. */
-        const uint64_t stuck_after = MUD_MSG_SENT_MAX * path->conf.beat;
-
-        if (path->msg.tx_seen && mud_timeout(now, path->msg.tx_seen, stuck_after))
-            mud_update_loss(&path->msg.tx_loss, now, 1,
-                            &path->tx.loss, &path->tx.loss_live, 0, 0);
-        if (path->msg.rxloss.time && mud_timeout(now, path->msg.rxloss.time, stuck_after))
-            mud_update_loss(&path->msg.rx_loss, now, 1,
-                            &path->rx.loss, &path->rx.loss_live, 0, 0);
-    }
 
     if (path->conf.state != MUD_UP)
         return now;
+
+    /* Monitor paths (see struct mud_path_conf's own comment) skip every bit
+     * of the ordinary beat scheduling below: they send on a genuinely fixed
+     * interval, never backed off the way an idle data sub-flow's beat is
+     * (that backoff is exactly the mechanism the probe design exists to
+     * avoid being subject to), and their status never needs to reach
+     * MUD_RUNNING/MUD_LOSSY/etc. -- mud_select_path() already excludes them
+     * from data regardless of status, and their contribution to the
+     * degrade decision is grp->probe_degraded, published by
+     * mud_probe_publish(), not this path's own path->status. */
+    if (path->conf.monitor) {
+        const uint64_t interval = path->conf.probe_interval
+                                 ? path->conf.probe_interval
+                                 : MUD_PROBE_INTERVAL_DEFAULT;
+
+        if (mud_timeout(now, path->probe.tx_last, interval)) {
+            path->probe.tx_last = now;
+            mud_send_msg(mud, path, now, 0, 0, 0, path->mtu);
+            now = mud_now(mud);
+        }
+        /* A silent peer (the whole physical link down, not just lossy)
+         * never trips mud_probe_recv()'s gap-filling at all -- nothing
+         * arrives to fill a gap with -- so path->probe.seen[] would
+         * otherwise sit frozen on whatever it last held, indefinitely,
+         * exactly the class of bug the byte-counter mechanism's own per-
+         * path idle-aging (just above in this function) exists to prevent.
+         * Once a full probe_window's worth of real time has passed with
+         * nothing received at all, force the group to 100% rather than
+         * leave stale good data live. path->probe.rx_last starting at 0
+         * (never yet received anything) is handled the same way by
+         * mud_timeout()'s own !last short-circuit -- correctly treated as
+         * "already timed out", not "just started", since a monitor path
+         * that has NEVER heard from its peer is exactly the silent case
+         * this exists to catch. */
+        const uint64_t window = path->conf.probe_window
+                               ? path->conf.probe_window
+                               : MUD_PROBE_WINDOW_DEFAULT;
+
+        if (mud_timeout(now, path->probe.rx_last, window * interval))
+            mud_probe_publish(mud, path, now, 255);
+
+        return now;
+    }
 
     uint64_t timeout = path->conf.beat;
 
@@ -2800,7 +2855,7 @@ mud_update(struct mud *mud)
     for (unsigned i = 0; i < mud->capacity; i++) {
         struct mud_path *path = &mud->paths[i];
 
-        if (path->status != MUD_RUNNING) {
+        if (path->status != MUD_RUNNING || path->conf.monitor) {
             path->select_weight = 0;
             continue;
         }
@@ -2810,7 +2865,11 @@ mud_update(struct mud *mud)
         for (unsigned j = 0; j < mud->capacity; j++) {
             struct mud_path *other = &mud->paths[j];
 
-            if (other->status != MUD_RUNNING ||
+            /* Excludes monitor siblings too -- their tx.rate never reflects
+             * real throughput (mud_select_path() never gives them data to
+             * carry), so folding one into this average would understate
+             * the group's real capacity by 1/(N+1) for no reason. */
+            if (other->status != MUD_RUNNING || other->conf.monitor ||
                 !mud_path_same_group(path, other))
                 continue;
 
@@ -2822,34 +2881,13 @@ mud_update(struct mud *mud)
     }
     mud->rate = weighted_rate;
 
-    /* Group RTT aggregation, and mirroring loss+RTT onto every member path
-     * -- see struct mud_group's own comment. mud_path_update() above (via
-     * mud_group_get()) already reads each group's tx_loss_pub/rx_loss_pub
-     * directly for the LOSSY decision, kept continuously fresh by
-     * mud_recv_msg()'s event-driven feed alone -- deliberately no once-per-
-     * tick idle-ageing call here to match it, unlike mud_path_track()'s own
-     * per-path equivalent. A per-path tracker needs that fallback because a
-     * single-socket path's beat cadence backs off to `keepalive` (25s) once
-     * idle (see mud_path_track()'s own comment), so long gaps between any
-     * message at all are routine and must be aged through. A group's
-     * tracker has no such gap to cover: with multiple sockets (the only
-     * case a group has more than one member to begin with) beats never back
-     * off, so at least one member's event-driven feed reaches this tracker
-     * every ~beat interval regardless of whether any *real* data is
-     * flowing -- confirmed live: adding the same idle-ageing call here,
-     * gated on every member's traffic_idle (which tracks real data only,
-     * deliberately excluding beat traffic -- see its own comment), fired on
-     * nearly every tick during a beat-only idle period and reset the
-     * tracker's in-progress bucket before the event-driven feed's own
-     * samples ever got a chance to close into it, leaving the published
-     * loss frozen for tens of seconds and then jumping abruptly once
-     * enough whole-second evictions had silently accumulated -- the same
-     * kind of staleness this whole mechanism exists to avoid, just moved
-     * to a different call site. A group whose members go fully idle in the
-     * beat sense too (the entire physical link down, not just quiet) is
-     * already caught by the pre-existing, unrelated MUD_MSG_SENT_MAX ->
-     * MUD_DEGRADED path in mud_path_update(), so nothing here needs to
-     * duplicate that. */
+    /* Group RTT aggregation, and mirroring it (plus probe health) onto
+     * every member path -- see struct mud_group's own comment. This used to
+     * also aggregate/mirror byte-counter tx-loss/rx-loss the same way;
+     * removed along with the rest of that mechanism, since `monitor` is
+     * mandatory on every path now and mud_path_update() reads
+     * grp->probe_degraded directly, fed continuously by mud_probe_recv()/
+     * mud_probe_publish() rather than by anything computed in this pass. */
     for (unsigned i = 0; i < MUD_PATH_MAX; i++) {
         struct mud_group *grp = &mud->groups[i];
 
@@ -2875,27 +2913,26 @@ mud_update(struct mud *mud)
         struct mud_path *path = &mud->paths[i];
 
         if (path->conf.state != MUD_UP && path->conf.state != MUD_PASSIVE) {
-            path->group_tx_loss = path->group_rx_loss = 0;
-            path->group_tx_loss_live = path->group_rx_loss_live = 0;
             path->group_rtt = 0;
+            path->group_probe_has_monitor = 0;
+            path->group_probe_loss = 0;
+            path->group_probe_degraded = 0;
             continue;
         }
         struct mud_group *grp = mud_group_get(mud, path);
 
         if (!grp) {
-            path->group_tx_loss = path->tx.loss;
-            path->group_rx_loss = path->rx.loss;
-            path->group_tx_loss_live = path->tx.loss_live;
-            path->group_rx_loss_live = path->rx.loss_live;
             path->group_rtt = path->rtt.val;
+            path->group_probe_has_monitor = 0;
+            path->group_probe_loss = 0;
+            path->group_probe_degraded = 0;
             continue;
         }
-        path->group_tx_loss = grp->tx_loss_pub;
-        path->group_rx_loss = grp->rx_loss_pub;
-        path->group_tx_loss_live = grp->tx_loss_live_pub;
-        path->group_rx_loss_live = grp->rx_loss_live_pub;
         path->group_rtt = grp->rtt_count ? grp->rtt_sum / grp->rtt_count
                                           : path->rtt.val;
+        path->group_probe_has_monitor = grp->probe_has_monitor;
+        path->group_probe_loss = grp->probe_loss_pub;
+        path->group_probe_degraded = grp->probe_degraded;
     }
 
     /* Per-path resequencing hold budget -- see mud_path.reorder_hold's own
@@ -2970,6 +3007,19 @@ mud_set_path(struct mud *mud, struct mud_path_conf *conf)
     }
     if (conf->rx_max_rate) c.rx_max_rate = path->rx.rate = conf->rx_max_rate;
     if (conf->mtu)          c.mtu         = conf->mtu;
+    /* Same 0-means-unchanged convention as every conditional field above:
+     * `path set ... probeinterval N` on an already-monitor path must not
+     * require re-stating `monitor` too, so a bare 0 here can only mean
+     * "not specified", same as loss_limit/beat/rtt_limit/mtu just above.
+     * One real asymmetry: there is no way to *clear* monitor once set this
+     * way, short of deleting and recreating the path -- acceptable for a
+     * property this structural (mud_select_path() and the group's degrade
+     * decision both key off it), not something an operator would expect
+     * to toggle back and forth on a live path. */
+    if (conf->monitor) c.monitor = 1;
+    if (conf->probe_interval) c.probe_interval = conf->probe_interval * MUD_ONE_MSEC;
+    if (conf->probe_window)   c.probe_window   = conf->probe_window;
+    if (conf->probe_recover)  c.probe_recover  = conf->probe_recover * MUD_ONE_MSEC;
 
     path->conf = c;
 

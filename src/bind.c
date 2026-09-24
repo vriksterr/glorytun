@@ -577,8 +577,22 @@ gt_bind(int argc, char **argv, void *data)
                     }
                     const unsigned int conn_count =
                         req.connections ? req.connections : 1;
+                    /* `monitor` (see mud_path_conf's own comment) always
+                     * requests one dedicated socket *in addition to*
+                     * conn_count data sub-flows, never in place of them --
+                     * a monitor-only group would have zero real data
+                     * capacity, which is never what's wanted even when the
+                     * request that carries `monitor` is the very one also
+                     * setting `connections`. Every conn_count-sized range
+                     * below therefore provisions conn_count + monitor_extra
+                     * real sockets; only the assignment loop further down
+                     * treats the two counts differently, applying `monitor`
+                     * to just the one extra slot instead of all of them. */
+                    const unsigned int monitor_extra =
+                        req.path.conf.monitor ? 1 : 0;
 
-                    if (conn_count > MUD_SOCK_MAX) {
+                    if (conn_count > MUD_SOCK_MAX ||
+                        (uint64_t)conn_count + monitor_extra > MUD_SOCK_MAX) {
                         res.ret = EINVAL;
                         break;
                     }
@@ -659,7 +673,8 @@ gt_bind(int argc, char **argv, void *data)
                             if (base_sock < reserved_sock_count)
                                 base_sock = reserved_sock_count;
                         }
-                        if ((uint64_t)base_sock + conn_count > MUD_SOCK_MAX) {
+                        if ((uint64_t)base_sock + conn_count + monitor_extra >
+                            MUD_SOCK_MAX) {
                             res.ret = ENOSPC;
                             break;
                         }
@@ -706,7 +721,8 @@ gt_bind(int argc, char **argv, void *data)
                              * warning below for the operator-facing
                              * ceiling this implies. */
                             unsigned int grown = base_sock;
-                            const unsigned int target = base_sock + conn_count;
+                            const unsigned int target = base_sock + conn_count +
+                                                        monitor_extra;
                             const unsigned int chunk = 8;
                             while (grown < target) {
                                 unsigned int next = grown + chunk;
@@ -722,7 +738,8 @@ gt_bind(int argc, char **argv, void *data)
                             }
                             if (res.ret)
                                 break;
-                        } else if (mud_set_sock_count(mud, base_sock + conn_count)) {
+                        } else if (mud_set_sock_count(mud, base_sock + conn_count +
+                                                      monitor_extra)) {
                             res.ret = errno;
                             break;
                         }
@@ -763,6 +780,9 @@ gt_bind(int argc, char **argv, void *data)
                              * each other for the handshake. */
                             struct mud_path_conf conf0 = req.path.conf;
                             conf0.sock = (uint16_t)base_sock;
+                            conf0.monitor = 0; /* a data sub-flow, never the
+                                                 * monitor_extra one -- see
+                                                 * its own comment above */
                             if (gt_path_manager_set(&path_manager, mud,
                                                     req.ifname, base_sock,
                                                     &conf0) && !res.ret)
@@ -797,6 +817,8 @@ gt_bind(int argc, char **argv, void *data)
                         for (unsigned int c = start_c; c < conn_count; c++) {
                             struct mud_path_conf conf = req.path.conf;
                             conf.sock = (uint16_t)(base_sock + c);
+                            conf.monitor = 0; /* data sub-flow -- see
+                                                * monitor_extra's own comment */
                             if (gt_path_manager_set(&path_manager, mud,
                                                     req.ifname, base_sock + c,
                                                     &conf) && !res.ret)
@@ -806,14 +828,33 @@ gt_bind(int argc, char **argv, void *data)
                                 have_first_conf = 1;
                             }
                         }
+                        /* The one extra dedicated monitor socket, if
+                         * requested -- see monitor_extra's own comment.
+                         * Placed one past the conn_count data sub-flows
+                         * this same request just provisioned, keeping the
+                         * data block itself exactly conn_count wide and
+                         * contiguous, unaffected by whether a monitor was
+                         * ever added. Uses req.path.conf as-is (monitor is
+                         * already 1 here, by construction of monitor_extra
+                         * itself), so probe_interval/window/recover in the
+                         * same request reach it correctly. */
+                        if (monitor_extra) {
+                            struct mud_path_conf mconf = req.path.conf;
+                            mconf.sock = (uint16_t)(base_sock + conn_count);
+                            if (gt_path_manager_set(&path_manager, mud,
+                                                    req.ifname,
+                                                    base_sock + conn_count,
+                                                    &mconf) && !res.ret)
+                                res.ret = errno;
+                        }
                         if (have_first_conf)
                             req.path.conf = first_conf;
                         /* bring down any sub-flows left over from a
-                         * previous, larger connections=N request for this
-                         * (ifname, remote) pair */
+                         * previous, larger connections=N (+ monitor)
+                         * request for this (ifname, remote) pair */
                         for (unsigned int i = 0; i < path_manager.count; i++) {
                             struct gt_managed_path *mp = &path_manager.path[i];
-                            if (mp->sock < base_sock + conn_count ||
+                            if (mp->sock < base_sock + conn_count + monitor_extra ||
                                 strcmp(mp->ifname, req.ifname) ||
                                 !gt_sockaddr_equal(&mp->remote,
                                                    &req.path.conf.remote))

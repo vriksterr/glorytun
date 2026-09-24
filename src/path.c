@@ -35,7 +35,7 @@ gt_path_status_text(struct ctl_msg *res)
  * sub-flows shares the same fixed remote port) but silently splits the
  * passive side's own view into one header per sub-flow, since each one it
  * auto-discovers has a distinct remote port by definition. That mismatch
- * would otherwise also fragment group_tx_loss/group_rx_loss/group_rtt's
+ * would otherwise also fragment group_rtt's/probe-loss's
  * display -- correct values, just repeated across several one-line
  * "groups" instead of pooled into the one that mud.c itself already
  * computed them for. */
@@ -168,23 +168,20 @@ gt_path_print_row(struct ctl_msg *res, int last)
     gt_path_format_mbps(tx_str, sizeof(tx_str), tx_bps);
     gt_path_format_mbps(rx_str, sizeof(rx_str), rx_bps);
 
-    printf("  %s %u  %-8s", last ? "\xe2\x94\x94\xe2\x94\x80" /* "└─" */
+    printf("  %s %u  %-8s%s", last ? "\xe2\x94\x94\xe2\x94\x80" /* "└─" */
                                   : "\xe2\x94\x9c\xe2\x94\x80" /* "├─" */,
-           res->path.conf.sock, gt_path_status_text(res));
+           res->path.conf.sock, gt_path_status_text(res),
+           res->path.conf.monitor ? "  monitor" : "");
 
     char tmp[INET6_ADDRSTRLEN];
 
-    printf("  tx %s  rx %s  rtt %.3f  tx-loss %3.2f  rx-loss %3.2f",
-           tx_str, rx_str,
-           res->path.rtt.val / 1e3,
-           res->path.tx.loss * 100 / 255.0,
-           res->path.rx.loss * 100 / 255.0);
-    if (res->path.traffic_idle)
-        printf("  tx-loss-live null  rx-loss-live null");
-    else
-        printf("  tx-loss-live %3.2f  rx-loss-live %3.2f",
-               res->path.tx.loss_live * 100 / 255.0,
-               res->path.rx.loss_live * 100 / 255.0);
+    /* tx-loss/rx-loss/tx-loss-live/rx-loss-live used to print here --
+     * removed entirely, not just hidden: `monitor` is mandatory on every
+     * path now (see "Probe-based path health" in mud.c), mud.c has
+     * stopped computing these four fields at all, and the group header's
+     * probe-loss/probe-status below is the only real loss/health figure
+     * that exists anymore. */
+    printf("  tx %s  rx %s  rtt %.3f", tx_str, rx_str, res->path.rtt.val / 1e3);
     printf("  mtu %zu", res->path.mtu);
     if (gt_toaddr(tmp, sizeof(tmp), &res->path.remote))
         printf("  public unknown\n");
@@ -233,7 +230,7 @@ gt_path_conf(struct ctl_msg *res)
 
     printf("path dev %s %s %s to addr %s port %"PRIu16" "
            "set %s pref %u beat %s losslimit %u%% rttlimit %s mtu %"PRIu64
-           " rate %s tx %s rx %s\n",
+           " rate %s tx %s rx %s%s\n",
             res->tun_name, res->ifname[0] ? "via" : "addr",
             res->ifname[0] ? res->ifname : local,
             remote, gt_get_port(&res->path.conf.remote),
@@ -242,7 +239,8 @@ gt_path_conf(struct ctl_msg *res)
             rttlimit,
             res->path.conf.mtu,
             res->path.conf.fixed_rate ? "fixed" : "auto",
-            tx, rx);
+            tx, rx,
+            res->path.conf.monitor ? "  monitor" : "");
 }
 
 static int
@@ -278,8 +276,21 @@ gt_path_status(int fd)
 
         unsigned int member_count = 0;
 
+        /* Two passes, not one: the monitor sub-flow (there's normally just
+         * one per group) always lands first, right under the group header
+         * where the probe-loss/probe-status figures it drives are printed
+         * -- instead of wherever its socket index happens to fall among
+         * the data sub-flows, which is wherever `path up ... monitor` was
+         * typed relative to the others. Every other member keeps its
+         * existing relative order, just shifted after it. */
         for (unsigned int j = g; j < count; j++) {
-            if (!printed[j] && gt_path_same_group(&rows[g], &rows[j]))
+            if (!printed[j] && gt_path_same_group(&rows[g], &rows[j]) &&
+                rows[j].path.conf.monitor)
+                members[member_count++] = j;
+        }
+        for (unsigned int j = g; j < count; j++) {
+            if (!printed[j] && gt_path_same_group(&rows[g], &rows[j]) &&
+                !rows[j].path.conf.monitor)
                 members[member_count++] = j;
         }
         char local[INET6_ADDRSTRLEN];
@@ -305,16 +316,23 @@ gt_path_status(int fd)
                    index_str, local, remote,
                    gt_get_port(&rows[g].path.conf.remote));
 
-        /* Pooled across every sub-flow of this physical link -- see
-         * struct mud_path's group_tx_loss/group_rx_loss/group_rtt fields
-         * (mud.h) for why this is what actually drives the losslimit/
-         * MUD_LOSSY decision now, not any one sub-flow's own (possibly
-         * stale) numbers below. Any member row carries the same mirrored
-         * value, so rows[g] (the group's first row) is as good as any. */
-        printf("  rtt %.3f  tx-loss %3.2f  rx-loss %3.2f\n",
-               rows[g].path.group_rtt / 1e3,
-               rows[g].path.group_tx_loss * 100 / 255.0,
-               rows[g].path.group_rx_loss * 100 / 255.0);
+        /* Pooled across every sub-flow of this physical link -- see struct
+         * mud_path's group_rtt field (mud.h). tx-loss/rx-loss used to be
+         * pooled and printed here too; removed entirely, not just hidden
+         * behind "n/a": `monitor` is mandatory on every path now, mud.c has
+         * stopped computing the byte-counter loss fields at all (see
+         * mud_update_rl()'s own comment), and probe-loss/probe-status is
+         * the only real loss/health figure left. Any member row carries
+         * the same mirrored group_* values, so rows[g] (the group's first
+         * row) is as good as any. */
+        printf("  rtt %.3f", rows[g].path.group_rtt / 1e3);
+        if (rows[g].path.group_probe_has_monitor)
+            printf("  probe-loss %3.2f  probe-status %s",
+                   rows[g].path.group_probe_loss * 100 / 255.0,
+                   rows[g].path.group_probe_degraded ? "degraded" : "healthy");
+        else
+            printf("  probe-status no-monitor");
+        printf("\n");
 
         for (unsigned int k = 0; k < member_count; k++) {
             printed[members[k]] = 1;
@@ -368,6 +386,9 @@ gt_path(int argc, char **argv, void *data)
     struct argz_ull loss = {.max = 100, .suffix = gt_argz_percent_suffix};
     struct argz_ull rttlimit = {.suffix = argz_time_suffix};
     struct argz_ull mtu = {.max = MUD_MTU_HARD_MAX};
+    struct argz_ull probeinterval = {.suffix = argz_time_suffix};
+    struct argz_ull probewindow  = {.min = 1, .max = MUD_PROBE_RING_SIZE};
+    struct argz_ull proberecover = {.suffix = argz_time_suffix};
 
     struct gt_argz_addr local = {0};
     struct gt_argz_addr remote = {0};
@@ -394,6 +415,17 @@ gt_path(int argc, char **argv, void *data)
         {"rttlimit",  "Disable path if RTT exceeds this", argz_ull, &rttlimit},
         {"mtu",  "Fixed MTU to use (wire size, default 1400)",
                                                         argz_ull, &mtu},
+        {"monitor", "Dedicated health-probe sub-flow: never carries data, "
+                     "drives this path's group's losslimit decision via a "
+                     "fixed-interval sequence-numbered probe instead of "
+                     "data-traffic loss counters (requires via)"},
+        {"probeinterval", "Interval between probes on a monitor path "
+                           "(default 1s)",     argz_ull, &probeinterval},
+        {"probewindow", "Probe samples the loss percentage is computed "
+                         "over (default 60)",  argz_ull, &probewindow},
+        {"proberecover", "Time a monitor-degraded group must stay under "
+                          "losslimit before recovering (default 60s)",
+                                                argz_ull, &proberecover},
         {"watch", "Refresh the view every second until interrupted"},
         {0}};
 
@@ -414,7 +446,11 @@ gt_path(int argc, char **argv, void *data)
                  argz_is_set(z, "rate") || argz_is_set(z, "beat") ||
                  argz_is_set(z, "pref") || argz_is_set(z, "connections") ||
                  argz_is_set(z, "losslimit") ||
-                 argz_is_set(z, "rttlimit") || argz_is_set(z, "mtu");
+                 argz_is_set(z, "rttlimit") || argz_is_set(z, "mtu") ||
+                 argz_is_set(z, "monitor") ||
+                 argz_is_set(z, "probeinterval") ||
+                 argz_is_set(z, "probewindow") ||
+                 argz_is_set(z, "proberecover");
     if (change && (argz_is_set(z, "show") ||
                   argz_is_set(z, "watch"))) {
         gt_log("Path changes and status views cannot be combined\n");
@@ -424,6 +460,11 @@ gt_path(int argc, char **argv, void *data)
     if (argz_is_set(z, "connections") && connections.value > 1 &&
         !ifname[0]) {
         gt_log("connections > 1 requires a path selected by 'via'\n");
+        ctl_delete(fd);
+        return -1;
+    }
+    if (argz_is_set(z, "monitor") && !ifname[0]) {
+        gt_log("monitor requires a path selected by 'via'\n");
         ctl_delete(fd);
         return -1;
     }
@@ -445,6 +486,10 @@ gt_path(int argc, char **argv, void *data)
                 .loss_limit  = loss.value * 255 / 100,
                 .rtt_limit   = rttlimit.value,
                 .mtu         = mtu.value,
+                .monitor        = argz_is_set(z, "monitor") ? 1 : 0,
+                .probe_interval = probeinterval.value,
+                .probe_window   = probewindow.value,
+                .probe_recover  = proberecover.value,
             },
         }, res = {0};
         memcpy(req.ifname, ifname, sizeof(req.ifname));
