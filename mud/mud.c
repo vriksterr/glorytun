@@ -96,14 +96,18 @@
 /* Trailing block appended to a monitor path's own control message, after
  * struct mud_msg and (always, whether or not it's actually in use --
  * see mud_send_msg()) the MUD_SEQ_EXT_SIZE gap the sequence-numbering
- * feature uses at that same fixed offset: just the sender's next probe
- * sequence number. Reuses struct mud_msg wholesale rather than inventing a
+ * feature uses at that same fixed offset: the sender's next probe sequence
+ * number (4 bytes), followed by two more bytes piggybacking that sender's
+ * own current view of receiving from its peer -- a 0-255 loss reading and
+ * a 0/1 degraded verdict (see "Probe-based path health"'s own comment on
+ * why mud_path_update()'s send/no-send decision needs this, not just the
+ * local reading). Reuses struct mud_msg wholesale rather than inventing a
  * new wire message type -- same pattern as the sequence-numbering
  * extension just above, for the same reason: a build that predates this
  * feature (or a path that isn't a monitor) never writes or looks at these
  * bytes, so nothing about the existing control-message format, its size
  * checks, or its decrypt path needs to change. */
-#define MUD_PROBE_EXT_SIZE (4U)
+#define MUD_PROBE_EXT_SIZE (6U)
 
 #define MUD_PKT_MIN_SIZE (MUD_TIME_SIZE + MUD_MAC_SIZE)
 #define MUD_PKT_MAX_SIZE MUD_MTU_HARD_MAX
@@ -427,7 +431,10 @@ struct mud_reorder {
  * members (tx_loss/rx_loss/tx_loss_pub/rx_loss_pub/tx_loss_live_pub/
  * rx_loss_live_pub) -- removed entirely along with the rest of that
  * mechanism, since `monitor` is mandatory on every path now and
- * probe_degraded below is the only loss/health signal anything reads. */
+ * peer_probe_degraded below is the signal mud_path_update() actually
+ * reads for its send/no-send decision (probe_degraded is this side's own
+ * receive-direction reading -- display/diagnostic only, see its own
+ * comment). */
 struct mud_group {
     int active;
     unsigned int local_ifindex;
@@ -459,6 +466,34 @@ struct mud_group {
                                  at/over threshold. Clears probe_degraded
                                  once now - probe_good_since >= the
                                  monitor's own configured probe_recover. */
+    /* What our peer's own monitor last told US about receiving from US --
+     * i.e. the health of the direction THIS side actually sends on, as
+     * opposed to probe_loss_pub/probe_degraded above (which is the health
+     * of the direction this side receives on). mud_path_update()'s
+     * MUD_LOSSY decision keys off peer_probe_degraded, not probe_degraded,
+     * for exactly this reason: "should I keep sending this way" needs to
+     * know whether the peer is hearing us, not whether we're hearing the
+     * peer -- see the wire-format comment in mud_send_msg() and
+     * mud_group_peer_report()'s own comment for how this gets filled in.
+     * Deliberately NOT wrapped in its own fast-degrade/slow-recover shape
+     * the way the local fields above are: the peer already ran that
+     * hysteresis on its own side before reporting the verdict, so applying
+     * it a second time here would just be double smoothing -- confirmed
+     * live, it roughly doubled how long a fresh group took to ever reach
+     * healthy. peer_probe_degraded is adopted directly from whatever the
+     * peer's own already-debounced verdict says. */
+    uint64_t peer_probe_loss_pub; /* 0-255 scale, display/diagnostic only */
+    int peer_probe_degraded;      /* the actual latched send/no-send decision */
+    uint64_t peer_probe_last; /* mud_now() a peer report was last accepted;
+                                 0 = never. mud_path_track()'s own per-tick
+                                 check forces peer_probe_degraded once this
+                                 goes stale for a full probe_window, same
+                                 "silence means assume the worst" principle
+                                 as the local silent-monitor fallback below
+                                 -- but unlike that one, this check runs for
+                                 both MUD_UP and MUD_PASSIVE paths, since a
+                                 passive side's peer can go silent on it
+                                 exactly as easily as an active side's can. */
 };
 
 struct mud {
@@ -1871,6 +1906,19 @@ mud_send_msg(struct mud *mud, struct mud_path *path, uint64_t now,
         if (size < need)
             size = need;
         mud_store32(ext, path->probe.tx_next++);
+
+        /* Piggyback this side's own current reading of the group (how well
+         * *we're* receiving from the peer) so the peer can use it for its
+         * own send/no-send decision about this path -- see the wire-format
+         * comment above MUD_PROBE_EXT_SIZE. A brand new group (nothing
+         * measured yet) reads 0/healthy here for a probe interval or two
+         * until real measurement catches up -- harmless, self-correcting,
+         * same spirit as every other "not yet warmed up" edge case in this
+         * file. */
+        struct mud_group *grp = mud_group_get(mud, path);
+
+        ext[4] = grp ? (unsigned char)grp->probe_loss_pub : 0;
+        ext[5] = (grp && grp->probe_degraded) ? 1 : 0;
     }
 
     mud_store(dst, MUD_MSG_MARK(now), MUD_TIME_SIZE);
@@ -2064,6 +2112,36 @@ mud_probe_publish(struct mud *mud, struct mud_path *path, uint64_t now,
     }
 }
 
+/* Applies a peer-reported (loss255, degraded) pair -- what the peer's own
+ * monitor last told us about receiving from *us* -- onto this path's group.
+ * Deliberately adopts `peer_degraded` directly, with no fast-degrade/slow-
+ * recover of its own layered on top: the peer already ran its own
+ * mud_probe_publish() hysteresis before ever putting this verdict on the
+ * wire, so re-debouncing an already-debounced decision here would just be
+ * double smoothing -- confirmed live, it was adding the peer's own
+ * proberecover delay on top of ours, roughly doubling how long a fresh
+ * group took to ever reach healthy. Staleness (the peer's reports going
+ * quiet, not just one saying "degraded") is guarded separately, by
+ * peer_report_seq's ordering check in mud_probe_recv() and by
+ * mud_path_track()'s own per-tick timeout below -- this function only
+ * needs to trust whatever verdict actually arrives. Called from
+ * mud_probe_recv() (a genuine report just arrived, piggybacked on this
+ * probe) and from mud_path_track()'s own per-tick check (the peer's
+ * reports have gone stale -- see that call site's own comment). */
+static void
+mud_group_peer_report(struct mud *mud, struct mud_path *path, uint64_t now,
+                      unsigned peer_loss255, int peer_degraded)
+{
+    struct mud_group *grp = mud_group_get(mud, path);
+
+    if (!grp)
+        return;
+
+    grp->peer_probe_last = now;
+    grp->peer_probe_loss_pub = peer_loss255;
+    grp->peer_probe_degraded = peer_degraded ? 1 : 0;
+}
+
 /* Feeds one freshly received probe sequence number into path->probe (see
  * its own comment in mud.h). Three cases: the very first probe this path
  * has ever seen (adopt it as the baseline -- handles a peer that started
@@ -2077,7 +2155,7 @@ mud_probe_publish(struct mud *mud, struct mud_path *path, uint64_t now,
  * history mixed into the window. */
 static void
 mud_probe_recv(struct mud *mud, struct mud_path *path, uint64_t now,
-               uint32_t seq)
+               uint32_t seq, unsigned peer_loss255, int peer_degraded)
 {
     if (!path->probe.rx_sync) {
         path->probe.rx_sync = 1;
@@ -2108,6 +2186,19 @@ mud_probe_recv(struct mud *mud, struct mud_path *path, uint64_t now,
                            ? (unsigned)path->conf.probe_window : 0;
 
     mud_probe_publish(mud, path, now, mud_probe_loss_255(path, window));
+
+    /* Only adopt the piggybacked peer report if this probe's own seq is
+     * newer than the one we last adopted a report from -- a reordered,
+     * lower-numbered probe arriving late (already handled above, correctly,
+     * for the loss ring itself) must not be allowed to overwrite a report
+     * from a probe we've already applied. Signed subtraction the same
+     * wrap-safe way the rest of this function reasons about seq gaps. */
+    if (!path->probe.peer_report_sync ||
+        (int32_t)(seq - path->probe.peer_report_seq) > 0) {
+        path->probe.peer_report_sync = 1;
+        path->probe.peer_report_seq = seq;
+        mud_group_peer_report(mud, path, now, peer_loss255, peer_degraded);
+    }
 }
 
 static void
@@ -2170,7 +2261,7 @@ mud_recv_msg(struct mud *mud, struct mud_path *path,
         const unsigned char *ext = data + sizeof(struct mud_msg) +
                                    MUD_SEQ_EXT_SIZE;
 
-        mud_probe_recv(mud, path, now, mud_load32(ext));
+        mud_probe_recv(mud, path, now, mud_load32(ext), ext[4], ext[5]);
     }
 
     if (tx_time) {
@@ -2618,10 +2709,16 @@ mud_path_update(struct mud *mud, struct mud_path *path, uint64_t now)
      * (see "Group loss" and "Probe-based path health" in glorytun-
      * notes.html). `monitor` is mandatory on every path now, so a group
      * with no monitor (misconfiguration) simply never goes LOSSY via this
-     * check -- there is no byte-counter fallback anymore. */
+     * check -- there is no byte-counter fallback anymore.
+     * Keyed off peer_probe_degraded (what the peer reports about receiving
+     * from us), not probe_degraded (what we ourselves receive from the
+     * peer) -- "should I keep sending this way" is a question about the
+     * direction we send on, which only the peer can actually measure. See
+     * struct mud_group's own comment on peer_probe_degraded for the full
+     * reasoning. */
     struct mud_group *grp = mud_group_get(mud, path);
 
-    if (grp && grp->probe_has_monitor && grp->probe_degraded) {
+    if (grp && grp->probe_has_monitor && grp->peer_probe_degraded) {
         path->status = MUD_LOSSY;
         return 0;
     }
@@ -2629,7 +2726,20 @@ mud_path_update(struct mud *mud, struct mud_path *path, uint64_t now)
         path->status = MUD_LATE;
         return 0;
     }
-    if (path->conf.state == MUD_PASSIVE &&
+    /* Excludes conf.monitor: this check's own patience budget
+     * (MUD_MSG_SENT_MAX * conf.beat) is sized for a normal data sub-flow's
+     * fast, frequent beat -- a monitor's genuinely-once-a-second cadence
+     * blows through that budget every single cycle, which used to make a
+     * passive side's own monitor row flicker between running/waiting on a
+     * steady ~1Hz rhythm even in perfect health (confirmed live). A
+     * monitor path doesn't need this check standing in for it any more:
+     * mud_path_track()'s own peer-report staleness timeout (see its
+     * comment) already detects "this monitor's peer has gone quiet" more
+     * precisely -- against the monitor's real probe_interval/probe_window,
+     * not the wrong beat-based budget -- and turns it into an actual
+     * degraded verdict feeding the real failover decision, not just a
+     * cosmetic status word. */
+    if (path->conf.state == MUD_PASSIVE && !path->conf.monitor &&
         mud_timeout(mud->last_recv_time, path->rx.time,
                     MUD_MSG_SENT_MAX * path->conf.beat)) {
         path->status = MUD_WAITING;
@@ -2688,6 +2798,36 @@ mud_path_track(struct mud *mud, struct mud_path *path, uint64_t now)
      * figure at all anymore. */
     path->traffic_idle = mud_timeout(now, path->idle, MUD_ONE_SEC);
 
+    /* Peer-report staleness fallback -- deliberately runs before the
+     * MUD_UP-only return just below, so it applies equally to a passive
+     * path's own monitor. A passive side has no send-scheduling block of
+     * its own (its replies only ever go out in response to hearing from
+     * the peer -- see mud_recv_msg()), but its peer can still go silent on
+     * it exactly as easily as an active side's peer can, and unlike the
+     * local silent-monitor fallback further below (MUD_UP only, since only
+     * an active side independently sends on a schedule to time out against),
+     * this one has to be symmetric: whichever side stops hearing peer
+     * reports needs to stop trusting a stale "peer says I'm healthy"
+     * reading, or the send-decision at the top of mud_path_update() would
+     * keep using it forever. Same "silence means assume the worst"
+     * principle, same probe_window-sized budget, just against
+     * peer_probe_last instead of path->probe.rx_last. */
+    if (path->conf.monitor) {
+        struct mud_group *grp = mud_group_get(mud, path);
+
+        if (grp) {
+            const uint64_t interval = path->conf.probe_interval
+                                     ? path->conf.probe_interval
+                                     : MUD_PROBE_INTERVAL_DEFAULT;
+            const uint64_t window = path->conf.probe_window
+                                   ? path->conf.probe_window
+                                   : MUD_PROBE_WINDOW_DEFAULT;
+
+            if (mud_timeout(now, grp->peer_probe_last, window * interval))
+                mud_group_peer_report(mud, path, now, 255, 1);
+        }
+    }
+
     if (path->conf.state != MUD_UP)
         return now;
 
@@ -2698,8 +2838,9 @@ mud_path_track(struct mud *mud, struct mud_path *path, uint64_t now)
      * avoid being subject to), and their status never needs to reach
      * MUD_RUNNING/MUD_LOSSY/etc. -- mud_select_path() already excludes them
      * from data regardless of status, and their contribution to the
-     * degrade decision is grp->probe_degraded, published by
-     * mud_probe_publish(), not this path's own path->status. */
+     * degrade decision is grp->peer_probe_degraded, published by
+     * mud_group_peer_report() from whatever the peer reports back, not
+     * this path's own path->status. */
     if (path->conf.monitor) {
         const uint64_t interval = path->conf.probe_interval
                                  ? path->conf.probe_interval
@@ -2886,8 +3027,9 @@ mud_update(struct mud *mud)
      * also aggregate/mirror byte-counter tx-loss/rx-loss the same way;
      * removed along with the rest of that mechanism, since `monitor` is
      * mandatory on every path now and mud_path_update() reads
-     * grp->probe_degraded directly, fed continuously by mud_probe_recv()/
-     * mud_probe_publish() rather than by anything computed in this pass. */
+     * grp->peer_probe_degraded directly, fed continuously by
+     * mud_probe_recv()/mud_group_peer_report() rather than by anything
+     * computed in this pass. */
     for (unsigned i = 0; i < MUD_PATH_MAX; i++) {
         struct mud_group *grp = &mud->groups[i];
 
@@ -2917,6 +3059,8 @@ mud_update(struct mud *mud)
             path->group_probe_has_monitor = 0;
             path->group_probe_loss = 0;
             path->group_probe_degraded = 0;
+            path->group_peer_probe_loss = 0;
+            path->group_peer_probe_degraded = 0;
             continue;
         }
         struct mud_group *grp = mud_group_get(mud, path);
@@ -2926,6 +3070,8 @@ mud_update(struct mud *mud)
             path->group_probe_has_monitor = 0;
             path->group_probe_loss = 0;
             path->group_probe_degraded = 0;
+            path->group_peer_probe_loss = 0;
+            path->group_peer_probe_degraded = 0;
             continue;
         }
         path->group_rtt = grp->rtt_count ? grp->rtt_sum / grp->rtt_count
@@ -2933,6 +3079,8 @@ mud_update(struct mud *mud)
         path->group_probe_has_monitor = grp->probe_has_monitor;
         path->group_probe_loss = grp->probe_loss_pub;
         path->group_probe_degraded = grp->probe_degraded;
+        path->group_peer_probe_loss = grp->peer_probe_loss_pub;
+        path->group_peer_probe_degraded = grp->peer_probe_degraded;
     }
 
     /* Per-path resequencing hold budget -- see mud_path.reorder_hold's own

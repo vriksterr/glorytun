@@ -222,18 +222,25 @@ struct mud_path {
      * pooled the same way here too (tx.loss/rx.loss above and their live
      * counterparts, plus group_tx_loss/group_rx_loss/group_tx_loss_live/
      * group_rx_loss_live) -- removed entirely along with the rest of that
-     * mechanism, since `monitor` is mandatory on every path now and
-     * group_probe_degraded below is the only loss/health signal
-     * mud_path_update() reads.
+     * mechanism, since `monitor` is mandatory on every path now.
      * group_probe_has_monitor lets display code (glorytun path) tell "this
-     * group has no monitor configured, ignore the other two" apart from "it
-     * has one and it currently reads 0%"; group_probe_degraded is the
-     * actual latched decision mud_path_update() uses, which can lag
-     * group_probe_loss crossing loss_limit by up to probe_recover on the
-     * way back down. */
+     * group has no monitor configured, ignore the other four" apart from
+     * "it has one and it currently reads 0%". group_probe_loss/
+     * group_probe_degraded are this side's own reading of what it receives
+     * from the peer -- display/diagnostic only as of the peer-reporting
+     * addition below; group_peer_probe_loss/group_peer_probe_degraded are
+     * what the peer last reported about receiving from *us*, and
+     * group_peer_probe_degraded is now the actual latched decision
+     * mud_path_update() uses for MUD_LOSSY -- "should I keep sending this
+     * way" has to depend on whether the peer is hearing us, not on whether
+     * we're hearing the peer, which group_probe_degraded alone could never
+     * tell it. See struct mud_group's own comment in mud.c for the full
+     * rationale. */
     int group_probe_has_monitor;
     uint64_t group_probe_loss;
     int group_probe_degraded;
+    uint64_t group_peer_probe_loss;
+    int group_peer_probe_degraded;
     uint64_t group_rtt; /* average rtt.val across every currently-RUNNING
                           * member of the group -- same rationale as the loss
                           * figures above, applied to latency: one path's own
@@ -315,6 +322,17 @@ struct mud_path {
         unsigned char seen[MUD_PROBE_RING_SIZE]; /* ring: 1 = that sequence
                               * number's slot was received, 0 = missed;
                               * indexed by seq % MUD_PROBE_RING_SIZE */
+        uint32_t peer_report_seq; /* seq of the last probe whose piggybacked
+                              * peer-report bytes were actually applied to
+                              * the group (see mud_group_peer_report()) --
+                              * a later-arriving but lower-numbered probe
+                              * (reordered in flight) must not be allowed to
+                              * overwrite a report from a probe we already
+                              * applied, so a report is only ever adopted
+                              * when its own seq is newer than this. */
+        int peer_report_sync; /* 0 until the first report has ever been
+                              * applied, so that first one is never rejected
+                              * for "not being newer than" an unset zero */
     } probe;
     uint64_t reorder_hold; /* recomputed once per mud_update() tick, same
                              * cadence as select_weight above: how much

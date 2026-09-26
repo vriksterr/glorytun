@@ -319,17 +319,26 @@ gt_path_status(int fd)
         /* Pooled across every sub-flow of this physical link -- see struct
          * mud_path's group_rtt field (mud.h). tx-loss/rx-loss used to be
          * pooled and printed here too; removed entirely, not just hidden
-         * behind "n/a": `monitor` is mandatory on every path now, mud.c has
-         * stopped computing the byte-counter loss fields at all (see
-         * mud_update_rl()'s own comment), and probe-loss/probe-status is
-         * the only real loss/health figure left. Any member row carries
-         * the same mirrored group_* values, so rows[g] (the group's first
-         * row) is as good as any. */
+         * behind "n/a": `monitor` is mandatory on every path now, and mud.c
+         * has stopped computing the byte-counter loss fields at all (see
+         * mud_update_rl()'s own comment). Two probe figures now, not one:
+         * recv-loss is this side's own reading (what *we* receive from the
+         * peer -- diagnostic only, as of the peer-reporting addition);
+         * peer-loss is what the peer last reported about receiving from
+         * *us*, and probe-status reflects peer-loss, not recv-loss --
+         * mud_path_update()'s actual send/no-send decision is keyed off
+         * the peer's report, since "should I keep sending this way" can
+         * only be answered by whoever is on the receiving end of that
+         * direction. See struct mud_group's own comment in mud.c
+         * (peer_probe_degraded) for the full reasoning. Any member row
+         * carries the same mirrored group_* values, so rows[g] (the
+         * group's first row) is as good as any. */
         printf("  rtt %.3f", rows[g].path.group_rtt / 1e3);
         if (rows[g].path.group_probe_has_monitor)
-            printf("  probe-loss %3.2f  probe-status %s",
+            printf("  recv-loss %3.2f  peer-loss %3.2f  probe-status %s",
                    rows[g].path.group_probe_loss * 100 / 255.0,
-                   rows[g].path.group_probe_degraded ? "degraded" : "healthy");
+                   rows[g].path.group_peer_probe_loss * 100 / 255.0,
+                   rows[g].path.group_peer_probe_degraded ? "degraded" : "healthy");
         else
             printf("  probe-status no-monitor");
         printf("\n");
