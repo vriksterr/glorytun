@@ -171,16 +171,20 @@ struct mud_msg {
     unsigned char pref;
     unsigned char fixed_rate;
     unsigned char loss_limit;
+    unsigned char rtt_limit[MUD_TIME_SIZE];
     /* Probe-based path health (see "Probe-based path health" above
      * mud_probe_loss_255()). Propagated the same way as pref/loss_limit/
-     * beat above (see mud_recv_msg()'s tx_time==0 branch) so a passively
-     * discovered path picks up "this is a monitor path" and the interval
-     * to expect it on from the active side automatically -- unlike
-     * probe_window/probe_recover (mud_path_conf's own fields), which stay
-     * local to whichever side computes that side's own probe_degraded and
-     * don't need to match to be individually correct. */
+     * beat/rtt_limit above (see mud_recv_msg()'s tx_time==0 branch) so a
+     * passively discovered path picks up "this is a monitor path", the
+     * interval to expect it on, and the same window/recover budget the
+     * active side is actually using, all automatically -- a VPS-side path
+     * that never runs its own `path up` still ends up using the exact same
+     * tuning the active side configured, rather than silently falling back
+     * to its own compiled-in defaults for these. */
     unsigned char monitor;
     unsigned char probe_interval[MUD_TIME_SIZE];
+    unsigned char probe_window[MUD_TIME_SIZE];
+    unsigned char probe_recover[MUD_TIME_SIZE];
     struct mud_addr addr;
 };
 
@@ -1949,10 +1953,17 @@ mud_send_msg(struct mud *mud, struct mud_path *path, uint64_t now,
     msg->pref = path->conf.pref;
     msg->fixed_rate = path->conf.fixed_rate;
     msg->loss_limit = path->conf.loss_limit;
+    MUD_STORE_MSG(msg->rtt_limit, path->conf.rtt_limit);
     msg->monitor = path->conf.monitor;
     MUD_STORE_MSG(msg->probe_interval, path->conf.probe_interval
                                       ? path->conf.probe_interval
                                       : MUD_PROBE_INTERVAL_DEFAULT);
+    MUD_STORE_MSG(msg->probe_window, path->conf.probe_window
+                                    ? path->conf.probe_window
+                                    : MUD_PROBE_WINDOW_DEFAULT);
+    MUD_STORE_MSG(msg->probe_recover, path->conf.probe_recover
+                                     ? path->conf.probe_recover
+                                     : MUD_PROBE_RECOVER_DEFAULT);
 
     const struct mud_crypto_opt opt = {
         .dst = dst,
@@ -2373,8 +2384,11 @@ mud_recv_msg(struct mud *mud, struct mud_path *path,
         }
         path->conf.pref = msg->pref;
         path->conf.loss_limit = msg->loss_limit;
+        path->conf.rtt_limit = MUD_LOAD_MSG(msg->rtt_limit);
         path->conf.monitor = msg->monitor;
         path->conf.probe_interval = MUD_LOAD_MSG(msg->probe_interval);
+        path->conf.probe_window = MUD_LOAD_MSG(msg->probe_window);
+        path->conf.probe_recover = MUD_LOAD_MSG(msg->probe_recover);
 
         /* An operator-set mtu (path up ... mtu N) always wins locally and
          * is never touched here -- mirrors how tx_pinned protects an
@@ -2912,6 +2926,7 @@ mud_path_track(struct mud *mud, struct mud_path *path, uint64_t now)
         case MUD_DEGRADED:
         case MUD_LOSSY:
         case MUD_PROBING:
+        case MUD_LATE:
             break;
         default:
             return now;

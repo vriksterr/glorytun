@@ -183,7 +183,9 @@ struct mud_path_conf {
                      * Widened from unsigned char alongside MUD_SOCK_MAX
                      * (see its own comment) -- was that field's own
                      * 0-255 range, not a deliberate ceiling. */
-    uint64_t rtt_limit;
+    uint64_t rtt_limit; /* synced from whichever side has `monitor` configured,
+                          * same as probe_interval/probe_window/probe_recover
+                          * below -- see their own comment. */
     uint64_t mtu; /* 0 = library default (MUD_MTU_DEFAULT); clamped to
                    * MUD_MTU_HARD_MAX regardless of what's requested -- see
                    * mud_mtu_apply() */
@@ -191,10 +193,19 @@ struct mud_path_conf {
      * `monitor` marks this path as a dedicated health-check sub-flow:
      * mud_select_path() never picks it for data, and it sends its probe on
      * a fixed cadence (probe_interval) regardless of the idle-driven beat
-     * backoff every other path is subject to. The three tunables below are
-     * only meaningful when monitor is set, and only need setting on one
-     * monitor path per group (its own group's mirrors everyone's); 0 means
-     * "use the compiled-in default" (see MUD_PROBE_*_DEFAULT in mud.c). */
+     * backoff every other path is subject to. The three tunables below --
+     * plus rtt_limit above -- are only meaningful when monitor is set, and
+     * only need setting on the active side's `path up`: mud_send_msg()/
+     * mud_recv_msg() propagate all four to a passively-discovered peer path
+     * the same way monitor/loss_limit themselves already do (see
+     * mud_recv_msg()'s tx_time==0 branch and struct mud_msg's own comment
+     * in mud.c), so a VPS-side path that never runs its own `path up` still
+     * ends up using the exact same window/recover/RTT budget the active
+     * side configured, instead of silently falling back to its own
+     * compiled-in defaults for whichever of these the active side didn't
+     * happen to match. 0 means "use the compiled-in default" (see
+     * MUD_PROBE_*_DEFAULT in mud.c) on whichever side has no explicit
+     * `path up` of its own to set it from. */
     unsigned char monitor;
     uint64_t probe_interval;
     uint64_t probe_window;

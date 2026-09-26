@@ -90,6 +90,8 @@ gt_path_manager_update_conf(struct gt_managed_path *path,
         path->desired_conf.fixed_rate = conf->fixed_rate >> 1;
     if (conf->loss_limit)
         path->desired_conf.loss_limit = conf->loss_limit;
+    if (conf->rtt_limit)
+        path->desired_conf.rtt_limit = conf->rtt_limit;
     if (conf->tx_max_rate)
         path->desired_conf.tx_max_rate = conf->tx_max_rate;
     if (conf->rx_max_rate)
