@@ -59,6 +59,17 @@
  * longer than this, at whatever interval they chose, is clamped to it. */
 #define MUD_PROBE_RING_SIZE (600U)
 
+/* How far a peer-reported probe seq is allowed to regress before
+ * mud_probe_recv() treats it as the peer's counter having restarted from
+ * zero, rather than as an ordinarily-reordered late arrival -- see that
+ * function's peer-report ordering guard. At the probe cadence this
+ * piggybacks on (at most 1/s), a handful of slots is already generous
+ * tolerance for real reordering; deliberately far smaller than
+ * MUD_PROBE_RING_SIZE, whose 10-minute sizing is tuned for the loss ring's
+ * own purpose and would otherwise let an early restart hide as reordering
+ * for minutes. */
+#define MUD_PEER_REPORT_REORDER_MAX (8U)
+
 /* Hard wire-size ceiling: 65535 is UDP's own length-field maximum
  * (header + payload). Note that over IPv4 the practical limit is lower
  * (65507 = 65535 - 20-byte IPv4 header - 8-byte UDP header) -- a

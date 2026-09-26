@@ -2189,12 +2189,27 @@ mud_probe_recv(struct mud *mud, struct mud_path *path, uint64_t now,
 
     /* Only adopt the piggybacked peer report if this probe's own seq is
      * newer than the one we last adopted a report from -- a reordered,
-     * lower-numbered probe arriving late (already handled above, correctly,
-     * for the loss ring itself) must not be allowed to overwrite a report
-     * from a probe we've already applied. Signed subtraction the same
-     * wrap-safe way the rest of this function reasons about seq gaps. */
-    if (!path->probe.peer_report_sync ||
-        (int32_t)(seq - path->probe.peer_report_seq) > 0) {
+     * lower-numbered probe arriving late must not be allowed to overwrite a
+     * report from a probe we've already applied. But a regression larger
+     * than MUD_PEER_REPORT_REORDER_MAX can only mean the peer's own seq
+     * counter restarted from zero, same reasoning as this function's own
+     * rx_next/seen[] restart case above -- ordinary reordering at a probe
+     * cadence of at most 1/s never regresses by more than a handful of
+     * slots. Deliberately its own small, purpose-specific tolerance rather
+     * than reusing MUD_PROBE_RING_SIZE (sized for the loss ring's own
+     * in-window reordering tolerance, up to 10 minutes' worth): gating this
+     * resync behind that much larger threshold would let a restart
+     * happening within the first MUD_PROBE_RING_SIZE seconds of a fresh
+     * connection masquerade as routine reordering, delaying the resync by
+     * up to that same 10 minutes instead of resyncing on the very next
+     * probe -- confirmed live, a restart minutes into a freshly-settled
+     * test tunnel took far longer than proberecover to clear because of
+     * exactly this. Signed subtraction the same wrap-safe way the rest of
+     * this function reasons about seq gaps. */
+    const int32_t report_diff = (int32_t)(seq - path->probe.peer_report_seq);
+
+    if (!path->probe.peer_report_sync || report_diff > 0 ||
+        -report_diff > (int32_t)MUD_PEER_REPORT_REORDER_MAX) {
         path->probe.peer_report_sync = 1;
         path->probe.peer_report_seq = seq;
         mud_group_peer_report(mud, path, now, peer_loss255, peer_degraded);
