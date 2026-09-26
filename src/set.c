@@ -31,7 +31,19 @@ gt_set(int argc, char **argv, void *data)
             .kxtimeout      = kx.value * UINT64_C(1000),
             .timetolerance  = tt.value * UINT64_C(1000),
             .keepalive      = ka.value * UINT64_C(1000),
-            .reorder_window = rw.value * UINT64_C(1000),
+            /* Same 0-means-unchanged convention as every other conf field
+             * here would normally make `reorderwindow 0` indistinguishable
+             * from not passing the flag at all -- no way to ever turn it
+             * back off once set, short of restarting the process. Steal the
+             * low bit as an explicit "this flag was given" marker instead
+             * (same trick path.c's own `pref` field already relies on):
+             * the real value only ever needs even microsecond counts here
+             * (already *1000 from a millisecond-granularity CLI value), so
+             * the low bit is always free for it. mud_set() shifts it back
+             * out before ever storing or returning it. */
+            .reorder_window = argz_is_set(z, "reorderwindow")
+                             ? ((rw.value * UINT64_C(1000)) << 1) | 1
+                             : 0,
         },
     }, res = {0};
 

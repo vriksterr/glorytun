@@ -1159,7 +1159,12 @@ mud_set(struct mud *mud, struct mud_conf *conf)
     if (conf->keepalive)      c.keepalive      = conf->keepalive;
     if (conf->timetolerance)  c.timetolerance  = conf->timetolerance;
     if (conf->kxtimeout)      c.kxtimeout      = conf->kxtimeout;
-    if (conf->reorder_window) c.reorder_window = conf->reorder_window;
+    /* conf->reorder_window carries an explicit-set marker in its low bit
+     * (see gt_set()'s own comment in set.c) so `reorderwindow 0` can
+     * actually disable it instead of being indistinguishable from "not
+     * passed" -- shift it back out before this ever reaches c or is
+     * handed back to the caller. */
+    if (conf->reorder_window) c.reorder_window = conf->reorder_window >> 1;
 
     mud->conf = c;
     pthread_mutex_unlock(&mud->state_lock);
