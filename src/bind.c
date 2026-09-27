@@ -126,7 +126,8 @@ gt_tun_write_validated(int fd, const void *buf, size_t size)
 
 struct gt_worker_arg {
     struct mud *mud;
-    int tun_fd;
+    const int *tun_fds;
+    unsigned int tun_fd_count;
     unsigned int worker_index;
     unsigned int worker_count;
 };
@@ -189,7 +190,8 @@ gt_worker_main(void *arg)
 {
     struct gt_worker_arg *a = arg;
 
-    mud_worker_loop(a->mud, a->worker_index, a->worker_count, a->tun_fd,
+    mud_worker_loop(a->mud, a->worker_index, a->worker_count,
+                    a->tun_fds, a->tun_fd_count,
                     tun_read, gt_tun_write_validated, &gt_quit);
     return NULL;
 }
@@ -365,22 +367,20 @@ gt_bind(int argc, char **argv, void *data)
         free(worker_tun_fd);
         return -1;
     }
-    /* One queue per worker instead of every worker sharing tun_fd, when
-     * the platform and this device support it (see tun_create()'s own
-     * comment) -- otherwise every worker's poll() races the others for
-     * whichever packet the kernel handed to fd 0, the same shared-fd
-     * "thundering herd" mud_worker_loop()'s own comment already describes
-     * for the case where this can't be done at all. Confirmed live on
-     * paired VMs: with a shared fd, per-core CPU during sustained load
-     * ranged from idle up to one core spiking as high as ~97% while
-     * others sat well under half that, despite each worker's own thread
-     * doing an evenly balanced share of the total work -- the imbalance
-     * was entirely about which physical core the kernel happened to
-     * schedule the "winning" reads onto, not the work itself. All-or-
-     * nothing: if any extra queue fails to open, every already-opened
-     * extra queue is closed and every worker falls back to sharing
-     * worker_tun_fd[0] (== tun_fd), rather than leaving some workers with
-     * their own queue and others without one. */
+    /* One queue per worker when the platform and this device support it
+     * (see tun_create()'s own comment), opened here once and handed to
+     * *every* worker below (not one exclusive queue each) -- every worker
+     * polls every queue, so any idle worker can drain whichever queue the
+     * kernel's own per-flow hashing happens to be favoring, instead of
+     * that queue's traffic being pinned to one fixed thread for the life
+     * of the flow. See mud_worker_loop()'s own comment in mud.h for why an
+     * exclusive-queue-per-worker split (tried first) doesn't actually
+     * balance load the way it looks like it should. All-or-nothing: if any
+     * extra queue fails to open, every already-opened extra queue is
+     * closed and every worker falls back to just worker_tun_fd[0] (==
+     * tun_fd, tun_fd_count 1) -- the original shared-single-fd behavior,
+     * rather than leaving some workers with a queue and others without
+     * one. */
     worker_tun_fd[0] = tun_fd;
     int queues_ok = 1;
 
@@ -397,14 +397,20 @@ gt_bind(int argc, char **argv, void *data)
     } else {
         queues_ok = 0;
     }
+    unsigned int tun_fd_count;
+
     if (!queues_ok) {
         for (unsigned int i = 1; i < worker_count; i++) {
             if (worker_tun_fd[i] > 0 && worker_tun_fd[i] != tun_fd)
                 close(worker_tun_fd[i]);
             worker_tun_fd[i] = tun_fd;
         }
-    } else if (worker_count > 1) {
-        gt_log("opened %u independent tun queues\n", worker_count);
+        tun_fd_count = 1;
+    } else {
+        tun_fd_count = worker_count;
+        if (worker_count > 1)
+            gt_log("opened %u independent tun queues, shared by every "
+                   "worker\n", worker_count);
     }
     /* mud_worker_loop()'s TX/RX halves each keep a pair of
      * MUD_MTU_HARD_MAX/MUD_PKT_MAX_SIZE-sized buffers (~128KB) live on the
@@ -427,7 +433,8 @@ gt_bind(int argc, char **argv, void *data)
     for (unsigned int i = 0; i < worker_count; i++) {
         worker_args[i] = (struct gt_worker_arg){
             .mud = mud,
-            .tun_fd = worker_tun_fd[i],
+            .tun_fds = worker_tun_fd,
+            .tun_fd_count = tun_fd_count,
             .worker_index = i,
             .worker_count = worker_count,
         };

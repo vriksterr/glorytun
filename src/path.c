@@ -5,6 +5,18 @@
 
 #include <time.h>
 
+/* Background-color highlighting for the group header's probe-status word --
+ * requested directly, terminal-only (gated on isatty() below, same
+ * precedent as bench.c's own isatty(1) check) so anything parsing this
+ * output (a script, a log file, `grep`) never sees raw escape codes mixed
+ * into the text. Foreground picked per background for contrast, not just
+ * the bare color, since a black-on-yellow "degraded" is a lot easier to
+ * actually read than default-on-yellow. */
+#define GT_COLOR_RESET  "\033[0m"
+#define GT_COLOR_GREEN  "\033[30;42m"
+#define GT_COLOR_YELLOW "\033[30;43m"
+#define GT_COLOR_RED    "\033[97;41m"
+
 static const char *
 gt_path_status_text(struct ctl_msg *res)
 {
@@ -158,11 +170,8 @@ gt_path_format_mbps(char *buf, size_t size, double bps)
 }
 
 static void
-gt_path_print_row(struct ctl_msg *res, int last)
+gt_path_print_row(struct ctl_msg *res, double tx_bps, double rx_bps, int last)
 {
-    double tx_bps, rx_bps;
-    gt_path_track_rate(res, &tx_bps, &rx_bps);
-
     char tx_str[32], rx_str[32];
 
     gt_path_format_mbps(tx_str, sizeof(tx_str), tx_bps);
@@ -269,6 +278,8 @@ gt_path_status(int fd)
     }
     int printed[MUD_PATH_MAX * 2] = {0};
     unsigned int members[MUD_PATH_MAX * 2];
+    double member_tx[MUD_PATH_MAX * 2], member_rx[MUD_PATH_MAX * 2];
+    const int use_color = isatty(STDOUT_FILENO);
 
     for (unsigned int g = 0; g < count; g++) {
         if (printed[g])
@@ -316,6 +327,27 @@ gt_path_status(int fd)
                    index_str, local, remote,
                    gt_get_port(&rows[g].path.conf.remote));
 
+        /* One rate sample per member, taken here rather than inside
+         * gt_path_print_row() itself -- that used to compute its own,
+         * but each member's underlying tracker slot only ever advances
+         * once per gt_path_status() call (see gt_path_track_rate()'s own
+         * comment), so it has to be read exactly once per row per call.
+         * Reading it here lets the same numbers feed both this group
+         * total and the per-row print below, instead of calling it twice
+         * and getting a second, bogus near-zero-elapsed diff on the
+         * second call. */
+        double total_tx = 0, total_rx = 0;
+        int have_rate = 0;
+
+        for (unsigned int k = 0; k < member_count; k++) {
+            gt_path_track_rate(&rows[members[k]], &member_tx[k], &member_rx[k]);
+            if (member_tx[k] >= 0) {
+                total_tx += member_tx[k];
+                total_rx += member_rx[k];
+                have_rate = 1;
+            }
+        }
+
         /* Pooled across every sub-flow of this physical link -- see struct
          * mud_path's group_rtt field (mud.h). tx-loss/rx-loss used to be
          * pooled and printed here too; removed entirely, not just hidden
@@ -334,18 +366,70 @@ gt_path_status(int fd)
          * carries the same mirrored group_* values, so rows[g] (the
          * group's first row) is as good as any. */
         printf("  rtt %.3f", rows[g].path.group_rtt / 1e3);
-        if (rows[g].path.group_probe_has_monitor)
-            printf("  recv-loss %3.2f  peer-loss %3.2f  probe-status %s",
+        if (have_rate) {
+            char totx_str[32], torx_str[32];
+
+            gt_path_format_mbps(totx_str, sizeof(totx_str), total_tx);
+            gt_path_format_mbps(torx_str, sizeof(torx_str), total_rx);
+            printf("  tx %s  rx %s", totx_str, torx_str);
+        } else {
+            printf("  tx -  rx -");
+        }
+        if (rows[g].path.group_probe_has_monitor) {
+            /* Color is a purely cosmetic overlay on top of the existing
+             * healthy/degraded text -- it never changes what that text
+             * says, only how it's highlighted, so the actual failover
+             * decision (mud.c's own peer_probe_degraded) is untouched.
+             * healthy: green normally, yellow if some member is `late`
+             * (rtt_limit exceeded) -- late and lossy are two genuinely
+             * separate mechanisms in mud.c (MUD_LATE vs MUD_LOSSY, checked
+             * independently in mud_path_update()), so a group can be
+             * perfectly healthy on loss while still running high ping; the
+             * color says so without claiming the text is wrong.
+             * degraded: red only when *both* recv-loss and peer-loss are
+             * over losslimit (the link is bad in both directions at once)
+             * -- yellow for every other degraded case, including a `late`
+             * member, exactly one loss direction over the limit, or the
+             * proberecover hysteresis tail (still degraded seconds after
+             * the numbers themselves already read clean). rtt_limit never
+             * escalates degraded to red on its own, only ever to yellow --
+             * requested explicitly, since a link that's merely slow isn't
+             * the same problem as one that's genuinely dropping packets in
+             * both directions. */
+            int any_late = 0;
+
+            for (unsigned int k = 0; k < member_count; k++)
+                if (rows[members[k]].path.status == MUD_LATE)
+                    any_late = 1;
+
+            const int degraded = rows[g].path.group_peer_probe_degraded;
+            const int recv_over = rows[g].path.group_probe_loss >
+                                   rows[g].path.conf.loss_limit;
+            const int peer_over = rows[g].path.group_peer_probe_loss >
+                                   rows[g].path.conf.loss_limit;
+            const char *color;
+
+            if (!degraded)
+                color = any_late ? GT_COLOR_YELLOW : GT_COLOR_GREEN;
+            else
+                color = (recv_over && peer_over) ? GT_COLOR_RED
+                                                  : GT_COLOR_YELLOW;
+
+            printf("  recv-loss %3.2f  peer-loss %3.2f  probe-status %s%s%s",
                    rows[g].path.group_probe_loss * 100 / 255.0,
                    rows[g].path.group_peer_probe_loss * 100 / 255.0,
-                   rows[g].path.group_peer_probe_degraded ? "degraded" : "healthy");
-        else
+                   use_color ? color : "",
+                   degraded ? "degraded" : "healthy",
+                   use_color ? GT_COLOR_RESET : "");
+        } else {
             printf("  probe-status no-monitor");
+        }
         printf("\n");
 
         for (unsigned int k = 0; k < member_count; k++) {
             printed[members[k]] = 1;
-            gt_path_print_row(&rows[members[k]], k == member_count - 1);
+            gt_path_print_row(&rows[members[k]], member_tx[k], member_rx[k],
+                              k == member_count - 1);
         }
         printf("\n");
     }
@@ -530,6 +614,22 @@ gt_path(int argc, char **argv, void *data)
         memcpy(req.ifname, ifname, sizeof(req.ifname));
 
         if (argz_is_set(z, "watch")) {
+            /* Alternate screen buffer (the same mechanism btop/htop/less
+             * use) -- entering it swaps to a separate screen that the
+             * terminal restores on exit, so every redraw below only ever
+             * touches that screen, never the scrollback history. Before
+             * this, each refresh cleared and redrew the *primary* screen
+             * in place (\033[H\033[J, cursor-home + clear), which looks
+             * identical while running but leaves every single frame
+             * sitting in scrollback -- confirmed live: Ctrl+C then
+             * scrolling up showed every past second's redraw, one after
+             * another, instead of nothing. Cursor hidden for the same
+             * reason a redrawing display normally hides it -- a visibly
+             * blinking cursor jumping to the top-left every second is
+             * itself distracting. Both are restored in the one exit path
+             * below, which every loop exit (error, Ctrl+C, or the peer
+             * going away) already funnels through. */
+            printf("\033[?1049h\033[?25l");
             while (!gt_quit) {
                 if (send(fd, &req, sizeof(req), 0) != sizeof(req)) {
                     ret = -1;
@@ -545,6 +645,8 @@ gt_path(int argc, char **argv, void *data)
 
                 sleep(1);
             }
+            printf("\033[?25h\033[?1049l");
+            fflush(stdout);
             /* Ctrl+C during send/recv surfaces as EINTR -- that is the
              * requested stop, not a failure worth reporting. */
             if (gt_quit)

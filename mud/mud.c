@@ -126,6 +126,30 @@
  * a few seconds, the same order of magnitude as TCP slow start. */
 #define MUD_TX_RATE_INITIAL (125000ULL)
 
+/* Hard safety ceiling on tx.rate -- but, per mud_update_rl()'s own use of
+ * it, only when path->conf.tx_max_rate is 0 (no operator ceiling at all),
+ * never overriding a real, intentional `rate tx`/`rate fixed tx` value no
+ * matter how high the operator set it. Without this, a path with no
+ * operator ceiling at all (the default, "auto" mode with no `rate tx`
+ * given) that never once hits the congestion branch grows tx.rate by 10%
+ * *every* ~100ms tick with nothing to ever stop it -- compounding that
+ * fast reaches 64-bit-overflow territory in well under a minute of real
+ * uptime (confirmed live: 10^16-10^19-range garbage values after 30-45s of
+ * a sustained, uncongested transfer). That garbage then corrupts
+ * mud_select_path()'s own arithmetic (`cursor * mud->rate`, mud->rate
+ * being the sum of every RUNNING path's select_weight, itself derived from
+ * tx.rate): a value this size overflows that multiplication for nearly
+ * every possible cursor, and the resulting wrapped, no-longer-meaningful
+ * selection was confirmed live to concentrate upwards of 85% of all real
+ * traffic onto a single sub-flow instead of spreading it evenly across a
+ * group the way equal select_weight values are supposed to. 1GB/s
+ * (8Gbit/s) per uncapped sub-flow is comfortably beyond anything this tool
+ * would realistically ever grow one to on its own, while leaving
+ * mud->rate (the sum across every uncapped path) many orders of magnitude
+ * below where the multiplication above could ever overflow again, even
+ * with far more sub-flows than any real deployment would configure. */
+#define MUD_TX_RATE_MAX (1000000000ULL)
+
 #define MUD_CTRL_SIZE (CMSG_SPACE(MUD_PKTINFO_SIZE) + \
                        CMSG_SPACE(sizeof(struct in6_pktinfo)))
 
@@ -2020,6 +2044,19 @@ mud_update_rl(struct mud_path *path, uint64_t tx_dt, uint64_t tx_bytes,
         if (!path->conf.fixed_rate)
             path->tx.rate += path->tx.rate / 10;
     }
+    /* Safety ceiling -- but only when nothing else already bounds this
+     * path: an operator-configured tx_max_rate (whether reached via
+     * `fixed` or via `auto` capped with an explicit `rate tx`) already
+     * caps the value exactly at whatever the operator actually asked for,
+     * a real intentional configuration this must never override -- an
+     * earlier version of this fix applied the ceiling unconditionally and
+     * would have silently clamped a legitimate `rate tx 10gbit` down to
+     * 1GB/s. MUD_TX_RATE_MAX only ever needs to catch the one case that
+     * has no ceiling of its own at all: `auto` mode with no `rate tx`
+     * given, tx_max_rate left at its 0 ("no operator ceiling") default --
+     * see MUD_TX_RATE_MAX's own comment for what runs away otherwise. */
+    if (!path->conf.tx_max_rate && path->tx.rate > MUD_TX_RATE_MAX)
+        path->tx.rate = MUD_TX_RATE_MAX;
     /* tx_max_rate == 0 means "no operator-configured ceiling", not "cap
      * of zero" -- see mud_get_path()'s own comment for the real, silent
      * deadlock this distinction fixes (every tick otherwise forced
@@ -3387,11 +3424,18 @@ mud_worker_count(void)
  * worker_index) removes that thundering herd entirely: a given socket now
  * has exactly one thread ever polling it. Recomputed from mud->sock_count
  * every iteration (not cached), so it stays correct as mud_set_sock_count()
- * grows the pool. tun_fd itself is still shared -- it is a single fd, not
- * a set that can be partitioned -- so its own wakeup is still shared across
- * threads; that residual herd is at most worker_count wide (small) rather
- * than worker_count x sock_count, and the batching below makes losing that
- * race a rare event under load rather than one that recurs per packet. */
+ * grows the pool. The TUN side is deliberately NOT partitioned the same
+ * way, even now that src/bind.c can open one queue per worker -- every
+ * worker polls every queue fd (see mud_worker_loop()'s own comment in
+ * mud.h for why: handing each worker one exclusive queue instead ties that
+ * queue's traffic to whichever kernel flow-hash bucket the OS's queue
+ * selection lands it in, which can pin nearly all the real work onto one
+ * queue's one worker for as long as that flow lasts). So the TUN-side
+ * wakeup is still shared across threads the way it always was; that herd
+ * is at most tun_fd_count x worker_count wide (small -- normally
+ * worker_count x worker_count, since one queue per worker is the common
+ * case), and the batching below makes losing that race a rare event under
+ * load rather than one that recurs per packet. */
 #define MUD_BATCH_MAX (16U)
 
 struct mud_rx_slot {
@@ -4063,14 +4107,21 @@ mud_reorder_poll_timeout(struct mud *mud, int idle_ms)
  * mud_recv_finish(), which this function is built out of. */
 int
 mud_worker_loop(struct mud *mud, unsigned int worker_index,
-                unsigned int worker_count, int tun_fd,
+                unsigned int worker_count,
+                const int *tun_fds, unsigned int tun_fd_count,
                 mud_tun_read_fn tun_read, mud_tun_write_fn tun_write,
                 const volatile sig_atomic_t *quit)
 {
-    if (!mud || tun_fd < 0 || !tun_read || !tun_write || !quit ||
-        !worker_count || worker_index >= worker_count) {
+    if (!mud || !tun_fds || !tun_fd_count || !tun_read || !tun_write ||
+        !quit || !worker_count || worker_index >= worker_count) {
         errno = EINVAL;
         return -1;
+    }
+    for (unsigned int i = 0; i < tun_fd_count; i++) {
+        if (tun_fds[i] < 0) {
+            errno = EINVAL;
+            return -1;
+        }
     }
     struct mud_worker_scratch *scratch = malloc(sizeof(*scratch));
 
@@ -4090,12 +4141,17 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
         /* mud->sock[i] for i < sock_count (just snapshotted above) never
          * changes once written -- see struct mud's comment -- so reading
          * it here needs no lock. */
-        struct pollfd fds[1 + MUD_SOCK_MAX];
-        unsigned int fd_sock[1 + MUD_SOCK_MAX];
-        unsigned int n = 1;
+        struct pollfd fds[MUD_WORKERS_EXPLICIT_MAX + MUD_SOCK_MAX];
+        unsigned int fd_sock[MUD_WORKERS_EXPLICIT_MAX + MUD_SOCK_MAX];
+        unsigned int n = tun_fd_count;
 
-        fds[0].fd = tun_fd;
-        fds[0].events = POLLIN;
+        /* Every worker polls every TUN queue -- see this function's own
+         * comment in mud.h for why that's deliberate even when the caller
+         * opened one queue per worker. */
+        for (unsigned int i = 0; i < tun_fd_count; i++) {
+            fds[i].fd = tun_fds[i];
+            fds[i].events = POLLIN;
+        }
 
         for (unsigned int i = worker_index; i < sock_count; i += worker_count) {
             fds[n].fd = mud->sock[i];
@@ -4120,107 +4176,133 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
              * while traffic went quiet; see mud_reorder_flush()'s and
              * mud_seq_flush()'s own timeout backstop. A no-op when
              * reorder_window is 0. */
-            mud_reorder_flush(mud, tun_fd, tun_write);
-            mud_seq_flush(mud, tun_fd, tun_write);
+            mud_reorder_flush(mud, tun_fds[0], tun_write);
+            mud_seq_flush(mud, tun_fds[0], tun_write);
             continue;
         }
 
-        /* TX half: TUN has a packet ready to encrypt and send. Concurrent
-         * tun_read() from multiple threads against the same fd is safe --
-         * the kernel hands each call a distinct queued packet. Drains up
-         * to MUD_BATCH_MAX packets (bounded by attempts, not just
-         * successes, so a run of no-path drops can't turn this into an
-         * unbounded spin) before handing them to mud_send_batch() as one
-         * or a few syscalls instead of one sendmsg() per packet. */
-        if ((fds[0].revents & POLLIN) && mud_send_wait(mud)) {
-            /* Rate window depleted -- tun_fd stays readable (the kernel
-             * still has queued packets), so without this a thread would
-             * spin calling poll() at 100% CPU doing nothing useful until
-             * housekeeping's next mud_update() refills the window. A
-             * short, bounded sleep instead of reading-and-dropping mirrors
-             * what bind.c's old !mud_send_wait(mud) gate did before ever
-             * touching tun. Still falls through to the RX half below --
-             * a depleted TX window says nothing about inbound work. */
+        /* TX half: one or more TUN queues have a packet ready to encrypt
+         * and send -- every worker polls every queue (see this function's
+         * comment in mud.h), so more than one may be ready at once. Rate
+         * check happens once per wakeup, not once per ready queue: if the
+         * window's depleted it stays depleted for all of them, and without
+         * this a thread would spin calling poll() at 100% CPU doing
+         * nothing useful until housekeeping's next mud_update() refills
+         * the window. A short, bounded sleep instead of reading-and-
+         * dropping mirrors what bind.c's old !mud_send_wait(mud) gate did
+         * before ever touching tun. Still falls through to the RX half
+         * below either way -- a depleted TX window says nothing about
+         * inbound work. */
+        int any_tun_ready = 0;
+
+        for (unsigned int i = 0; i < tun_fd_count; i++)
+            if (fds[i].revents & POLLIN)
+                any_tun_ready = 1;
+
+        if (any_tun_ready && mud_send_wait(mud)) {
             struct timespec ts = {.tv_nsec = 1000000}; /* 1ms */
             nanosleep(&ts, NULL);
-        } else if (fds[0].revents & POLLIN) {
-            unsigned int tx_n = 0, tx_attempts = 0;
-            uint16_t tx_key[MUD_BATCH_MAX];
+        } else if (any_tun_ready) {
+            /* Staggered by worker_index rather than always starting at 0:
+             * every worker otherwise scans the same queues in the same
+             * fixed order, so whichever thread happens to reach a given
+             * index first (a scheduling-latency accident, not anything
+             * meaningful) keeps winning that queue's reads run after run --
+             * confirmed live, one worker still sat at roughly double every
+             * other's CPU share with this scan starting at 0 for everyone,
+             * even after every worker was already polling every queue.
+             * Rotating each worker's own starting point spreads out who
+             * gets first look at which queue instead of always favoring
+             * whichever thread is fastest into this loop. */
+            for (unsigned int off = 0; off < tun_fd_count; off++) {
+                const unsigned int qi = (worker_index + off) % tun_fd_count;
 
-            /* Pass 1: drain TUN and encrypt, with no locking at all --
-             * mud_encrypt() takes only the much less contended keyx_lock,
-             * briefly, internally. Path selection is deliberately deferred
-             * to pass 2 below rather than done per packet here: with the
-             * TUN wakeup still shared across every worker (see the comment
-             * above MUD_BATCH_MAX), several threads can win a real packet
-             * from the same readiness event and batch-drain concurrently:
-             * locking state_lock per packet inside this loop would mean up
-             * to MUD_BATCH_MAX threads each doing up to MUD_BATCH_MAX
-             * lock/unlock cycles at once -- worse mutex contention than the
-             * unbatched original ever had. One lock covering the whole
-             * batch's selection (pass 2) bounds that to one acquisition per
-             * thread per wakeup, same as before batching existed. */
-            while (tx_n < MUD_BATCH_MAX && tx_attempts < MUD_BATCH_MAX) {
-                tx_attempts++;
-
-                const int r = tun_read(tun_fd, plain, sizeof(plain));
-
-                if (r <= 0)
-                    break;
-
-                struct mud_tx_slot *s = &scratch->tx[tx_n];
-                const size_t packet_size = mud_encrypt(mud, mud_now(mud),
-                                                       s->packet,
-                                                       sizeof(s->packet),
-                                                       plain, (size_t)r);
-                if (!packet_size)
+                if (!(fds[qi].revents & POLLIN))
                     continue;
 
-                memcpy(&tx_key[tx_n], &s->packet[packet_size - sizeof(tx_key[0])],
-                      sizeof(tx_key[0]));
-                s->size = packet_size;
-                s->path = NULL;
-                tx_n++;
+                const int tun_fd = tun_fds[qi];
+                unsigned int tx_n = 0, tx_attempts = 0;
+                uint16_t tx_key[MUD_BATCH_MAX];
 
-                if (mud_send_wait(mud))
-                    break;
-            }
-            /* Pass 2: one lock for the whole batch's path selection, then
-             * one unlock before any syscall -- sendmmsg()/sendmsg() itself
-             * intentionally runs outside state_lock -- see
-             * mud_sendmsg_to()'s comment. Each slot's `path` stays a valid
-             * pointer across that gap (mud->paths is fixed-size, never
-             * moves); the only residual risk is that exact slot getting
-             * recycled by housekeeping's 5-minutes-silent cleanup in the
-             * tiny window before the stats update re-locks -- unreachable
-             * in practice (a path just selected here is by definition not
-             * idle), and even then the failure mode is misattributing a
-             * few bytes to a reused slot's stats, not a crash or security
-             * issue. Slots that find no path (s->path left NULL) are
-             * skipped by mud_send_batch(), not compacted out -- avoids
-             * copying MUD_PKT_MAX_SIZE-sized slots around for what should
-             * be a rare case (no path up at all). */
-            if (tx_n) {
-                const uint64_t now = mud_now(mud);
+                /* Pass 1: drain this queue and encrypt, with no locking at
+                 * all -- mud_encrypt() takes only the much less contended
+                 * keyx_lock, briefly, internally. Path selection is
+                 * deliberately deferred to pass 2 below rather than done
+                 * per packet here: with every queue polled by every worker
+                 * (see the comment above MUD_BATCH_MAX and this function's
+                 * own mud.h comment), several threads can win a real
+                 * packet from the same readiness event and batch-drain
+                 * concurrently: locking state_lock per packet inside this
+                 * loop would mean up to MUD_BATCH_MAX threads each doing
+                 * up to MUD_BATCH_MAX lock/unlock cycles at once -- worse
+                 * mutex contention than the unbatched original ever had.
+                 * One lock covering the whole batch's selection (pass 2)
+                 * bounds that to one acquisition per thread per wakeup,
+                 * same as before batching existed. */
+                while (tx_n < MUD_BATCH_MAX && tx_attempts < MUD_BATCH_MAX) {
+                    tx_attempts++;
 
-                pthread_mutex_lock(&mud->state_lock);
-                for (unsigned int t = 0; t < tx_n; t++) {
-                    struct mud_tx_slot *s = &scratch->tx[t];
-                    struct mud_path *path = mud_select_path(mud, tx_key[t]);
+                    const int r = tun_read(tun_fd, plain, sizeof(plain));
 
-                    if (!path)
+                    if (r <= 0)
+                        break;
+
+                    struct mud_tx_slot *s = &scratch->tx[tx_n];
+                    const size_t packet_size = mud_encrypt(mud, mud_now(mud),
+                                                           s->packet,
+                                                           sizeof(s->packet),
+                                                           plain, (size_t)r);
+                    if (!packet_size)
                         continue;
 
-                    path->idle = now;
-                    s->local = path->conf.local;
-                    s->remote = path->conf.remote;
-                    s->local_ifindex = path->conf.local_ifindex;
-                    s->sock = path->conf.sock;
-                    s->path = path;
-                }
-                pthread_mutex_unlock(&mud->state_lock);
+                    memcpy(&tx_key[tx_n],
+                          &s->packet[packet_size - sizeof(tx_key[0])],
+                          sizeof(tx_key[0]));
+                    s->size = packet_size;
+                    s->path = NULL;
+                    tx_n++;
 
-                mud_send_batch(mud, scratch->tx, tx_n, now);
+                    if (mud_send_wait(mud))
+                        break;
+                }
+                /* Pass 2: one lock for the whole batch's path selection,
+                 * then one unlock before any syscall -- sendmmsg()/
+                 * sendmsg() itself intentionally runs outside state_lock --
+                 * see mud_sendmsg_to()'s comment. Each slot's `path` stays
+                 * a valid pointer across that gap (mud->paths is fixed-
+                 * size, never moves); the only residual risk is that exact
+                 * slot getting recycled by housekeeping's 5-minutes-silent
+                 * cleanup in the tiny window before the stats update
+                 * re-locks -- unreachable in practice (a path just
+                 * selected here is by definition not idle), and even then
+                 * the failure mode is misattributing a few bytes to a
+                 * reused slot's stats, not a crash or security issue.
+                 * Slots that find no path (s->path left NULL) are skipped
+                 * by mud_send_batch(), not compacted out -- avoids copying
+                 * MUD_PKT_MAX_SIZE-sized slots around for what should be a
+                 * rare case (no path up at all). */
+                if (tx_n) {
+                    const uint64_t now = mud_now(mud);
+
+                    pthread_mutex_lock(&mud->state_lock);
+                    for (unsigned int t = 0; t < tx_n; t++) {
+                        struct mud_tx_slot *s = &scratch->tx[t];
+                        struct mud_path *path = mud_select_path(mud, tx_key[t]);
+
+                        if (!path)
+                            continue;
+
+                        path->idle = now;
+                        s->local = path->conf.local;
+                        s->remote = path->conf.remote;
+                        s->local_ifindex = path->conf.local_ifindex;
+                        s->sock = path->conf.sock;
+                        s->path = path;
+                    }
+                    pthread_mutex_unlock(&mud->state_lock);
+
+                    mud_send_batch(mud, scratch->tx, tx_n, now);
+                }
             }
         }
         /* RX half: each ready socket is drained via mud_recv_batch() --
@@ -4228,7 +4310,7 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
          * instead of one recvmsg() per wakeup. Safe to drain fully now
          * (unlike the old shared-poll design) because socket partitioning
          * above guarantees no other thread is waiting on this same fd. */
-        for (unsigned int k = 1; k < n; k++) {
+        for (unsigned int k = tun_fd_count; k < n; k++) {
             /* A connected socket (see mud_path_promote()) whose peer has
              * gone away -- restarted process, changed source port -- gets
              * an ICMP "port unreachable" from the kernel, which sits on
@@ -4275,7 +4357,7 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
                     if (!mud->conf.reorder_window ||
                         !mud_seq_insert(mud, seq, path_hold, mud_now(mud),
                                         out, (size_t)wn))
-                        tun_write(tun_fd, out, (size_t)wn);
+                        tun_write(tun_fds[0], out, (size_t)wn);
                     continue;
                 }
 
@@ -4290,13 +4372,13 @@ mud_worker_loop(struct mud *mud, unsigned int worker_index,
                 if (!mud->conf.reorder_window ||
                     !mud_reorder_insert(mud, path_hold, mud_now(mud),
                                         out, (size_t)wn))
-                    tun_write(tun_fd, out, (size_t)wn);
+                    tun_write(tun_fds[0], out, (size_t)wn);
             }
         }
         /* Deliver anything in either reorder buffer that's ready after this
          * iteration's RX work -- a no-op when reorder_window is 0. */
-        mud_reorder_flush(mud, tun_fd, tun_write);
-        mud_seq_flush(mud, tun_fd, tun_write);
+        mud_reorder_flush(mud, tun_fds[0], tun_write);
+        mud_seq_flush(mud, tun_fds[0], tun_write);
     }
     free(scratch);
     return ret;

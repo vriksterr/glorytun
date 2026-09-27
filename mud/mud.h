@@ -453,31 +453,52 @@ void mud_set_worker_count (unsigned int n);
 typedef int (*mud_tun_read_fn)(int fd, void *buf, size_t size);
 typedef int (*mud_tun_write_fn)(int fd, const void *buf, size_t size);
 
-/* Runs one worker's full packet-processing loop: waits (via poll()) on the
- * TUN device and this worker's share of the instance's socket pool, and
- * for whichever is ready, does the complete job itself with no hand-off to
- * another thread -- receive, decrypt, look up the path, update its stats,
- * write to TUN (via `tun_write`); or read TUN (via `tun_read`), encrypt,
+/* Runs one worker's full packet-processing loop: waits (via poll()) on
+ * every TUN queue fd in `tun_fds` and this worker's share of the instance's
+ * socket pool, and for whichever is ready, does the complete job itself
+ * with no hand-off to another thread -- receive, decrypt, look up the
+ * path, update its stats, write to TUN (via `tun_write`, always through
+ * `tun_fds[0]` -- any queue fd can inject a packet into the interface, so
+ * which one is used for writing doesn't matter); or read TUN (via
+ * `tun_read`, from whichever of `tun_fds` was actually readable), encrypt,
  * pick a path, send. Safe to run from multiple threads concurrently
- * against the same `struct mud *` and `tun_fd` -- that is the intended
- * use: start mud_worker_count() threads, each with its own worker_index in
- * [0, worker_count), so the full pipeline -- not just encryption --
- * spreads across cores instead of running on one thread while only crypto
- * is parallel.
+ * against the same `struct mud *` and the same `tun_fds` -- that is the
+ * intended use: start mud_worker_count() threads, each with its own
+ * worker_index in [0, worker_count), all given the *same* `tun_fds`/
+ * `tun_fd_count`, so the full pipeline -- not just encryption -- spreads
+ * across cores instead of running on one thread while only crypto is
+ * parallel.
  *
  * `worker_index`/`worker_count` partition the socket pool: this call only
  * polls sock indices i where (i % worker_count == worker_index), so a
  * given socket is polled by exactly one thread rather than every thread
  * waking on every socket's readiness (a thundering herd where only one
- * waker ever does useful work per event). The TUN fd itself is still
- * shared -- it can't be partitioned the way a set of sockets can -- so its
- * wakeup remains shared across all workers, just with a much smaller herd
- * (worker_count wide, not worker_count x sock_count) and batched enough
- * work per successful read that losing the race is rare under load rather
- * than recurring per packet. Each ready fd is drained in batches (up to 16
- * packets per wakeup, via recvmmsg()/sendmmsg() on Linux, or an equivalent
- * bounded loop elsewhere) rather than one packet per poll() iteration.
- * Every caller must use the same worker_count for all threads of one
+ * waker ever does useful work per event). The TUN queues in `tun_fds` are
+ * deliberately NOT partitioned the same way, even when the caller opened
+ * one queue per worker (multi-queue TUN, see src/bind.c) -- every worker
+ * polls every queue. Handing each worker one *exclusive* queue instead
+ * (tried first) ties that queue's traffic to whichever kernel flow-hash
+ * bucket the OS's queue selection happens to land it in for the life of
+ * that flow: confirmed live, a single dominant flow (or several hashing
+ * into the same bucket) then pins nearly all the real work onto that one
+ * queue's one worker forever, no matter how many other workers/queues
+ * exist -- one thread measured at ~88% CPU while the other seven combined
+ * stayed under 17%, on 8 workers/8 queues. Every worker polling every
+ * queue means any idle worker can drain a busy queue's next ready batch,
+ * so a kernel-side hot queue no longer pins its processing to one fixed
+ * thread. This is a smaller herd than the pre-multi-queue shared-single-fd
+ * design it might look like: that one had one fd shared by potentially far
+ * more workers than real flows; this has `tun_fd_count` fds (normally one
+ * per worker already) each shared by `worker_count` pollers, and the same
+ * per-fd batching below keeps losing an occasional race cheap. Concurrent
+ * tun_read() from multiple threads against the same queue fd is safe, the
+ * same way it already is for a single shared fd -- the kernel hands each
+ * call a distinct queued packet.
+ *
+ * Each ready fd is drained in batches (up to 16 packets per wakeup, via
+ * recvmmsg()/sendmmsg() on Linux, or an equivalent bounded loop elsewhere)
+ * rather than one packet per poll() iteration. Every caller must use the
+ * same worker_count, tun_fds, and tun_fd_count for all threads of one
  * `struct mud *` (mismatched values just waste polling coverage rather
  * than corrupting state, but there is no reason to do it).
  *
@@ -494,7 +515,8 @@ typedef int (*mud_tun_write_fn)(int fd, const void *buf, size_t size);
  * poll() wait -- when the flag flips) or a fatal error occurs, then
  * returns 0 (quit requested) or -1 (errno set). */
 int mud_worker_loop (struct mud *mud, unsigned int worker_index,
-                     unsigned int worker_count, int tun_fd,
+                     unsigned int worker_count,
+                     const int *tun_fds, unsigned int tun_fd_count,
                      mud_tun_read_fn tun_read, mud_tun_write_fn tun_write,
                      const volatile sig_atomic_t *quit);
 
