@@ -17,6 +17,52 @@ ctl_rundir(char *dst, size_t size)
         "/var/run/"     PACKAGE_NAME ".%u",
         "/tmp/"         PACKAGE_NAME ".%u",
     };
+    /* First pass: prefer whichever candidate already actually has a real
+     * control socket sitting in it, over "whichever one happens to be
+     * writable right now" -- /run/user/<uid> only exists while at least
+     * one login session for that user is active (systemd tears the whole
+     * directory down when the last one ends, unless `loginctl enable-
+     * linger` is set), so its existence can flip between yes and no from
+     * one moment to the next, completely independent of whether a
+     * glorytun daemon is even running or which directory it actually
+     * picked when it started. Without this, a daemon that started (and
+     * picked its directory via the second pass below) while no session
+     * was active becomes permanently unreachable to any client run later
+     * while a session happens to be active, purely because an earlier,
+     * unrelated candidate now also passes the plain writability check --
+     * confirmed live in production: the daemon correctly landed in
+     * /run/glorytun.0 (no session at boot), but `glorytun path` run from
+     * an active SSH session kept reporting "no active tunnel" because it
+     * found /run/user/0 writable (a session was active by then) and
+     * stopped there without ever finding the daemon's real socket. */
+    for (unsigned i = 0; i < COUNT(fmt); i++) {
+        int ret = snprintf(dst, size, fmt[i], geteuid());
+
+        if ((ret <= 0) || (size_t)ret >= size)
+            continue;
+
+        DIR *dp = opendir(dst);
+
+        if (!dp)
+            continue;
+
+        int has_entry = 0;
+
+        for (struct dirent *d; (d = readdir(dp));) {
+            if (d->d_name[0] != '.') {
+                has_entry = 1;
+                break;
+            }
+        }
+        closedir(dp);
+
+        if (has_entry)
+            return dst;
+    }
+    /* Second pass: nothing exists anywhere yet -- the genuinely-fresh
+     * case, e.g. the very first `bind` on this box -- so fall back to the
+     * original rule, picking the first candidate whose parent directory
+     * this process can actually create a new socket in. */
     for (unsigned i = 0; i < COUNT(fmt); i++) {
         char path[128];
         int ret = snprintf(dst, size, fmt[i], geteuid());

@@ -355,14 +355,16 @@ gt_path_status(int fd)
          * has stopped computing the byte-counter loss fields at all (see
          * mud_update_rl()'s own comment). Two probe figures now, not one:
          * recv-loss is this side's own reading (what *we* receive from the
-         * peer -- diagnostic only, as of the peer-reporting addition);
-         * peer-loss is what the peer last reported about receiving from
-         * *us*, and probe-status reflects peer-loss, not recv-loss --
-         * mud_path_update()'s actual send/no-send decision is keyed off
-         * the peer's report, since "should I keep sending this way" can
-         * only be answered by whoever is on the receiving end of that
-         * direction. See struct mud_group's own comment in mud.c
-         * (peer_probe_degraded) for the full reasoning. Any member row
+         * peer); peer-loss is what the peer last reported about receiving
+         * from *us*. probe-status shown below reflects EITHER direction
+         * being over losslimit -- requested explicitly, since a link
+         * dropping packets in only one direction is still a degraded link
+         * from where you're sitting watching it. mud_path_update()'s actual
+         * send/no-send decision stays keyed off peer-loss alone (see struct
+         * mud_group's own comment in mud.c on peer_probe_degraded): "should
+         * I keep sending this way" can only be answered by whoever is on
+         * the receiving end of that direction, so recv-loss alone never
+         * triggers failover, only the displayed status text. Any member row
          * carries the same mirrored group_* values, so rows[g] (the
          * group's first row) is as good as any. */
         printf("  rtt %.3f", rows[g].path.group_rtt / 1e3);
@@ -376,10 +378,12 @@ gt_path_status(int fd)
             printf("  tx -  rx -");
         }
         if (rows[g].path.group_probe_has_monitor) {
-            /* Color is a purely cosmetic overlay on top of the existing
-             * healthy/degraded text -- it never changes what that text
-             * says, only how it's highlighted, so the actual failover
-             * decision (mud.c's own peer_probe_degraded) is untouched.
+            /* Color is a purely cosmetic overlay on top of the healthy/
+             * degraded text -- it never changes what that text says, only
+             * how it's highlighted, and neither one touches the actual
+             * failover decision (mud.c's own peer_probe_degraded), which
+             * stays keyed off peer-loss alone regardless of what's shown
+             * here.
              * healthy: green normally, yellow if some member is `late`
              * (rtt_limit exceeded) -- late and lossy are two genuinely
              * separate mechanisms in mud.c (MUD_LATE vs MUD_LOSSY, checked
@@ -402,7 +406,16 @@ gt_path_status(int fd)
                 if (rows[members[k]].path.status == MUD_LATE)
                     any_late = 1;
 
-            const int degraded = rows[g].path.group_peer_probe_degraded;
+            /* Union of both latches, not just the peer one -- each side
+             * already has its own independent fast-degrade/slow-recover
+             * hysteresis in mud.c (probe_degraded for recv, peer_probe_
+             * degraded for peer), so this reuses that debouncing rather
+             * than re-deriving a raw instantaneous threshold check here,
+             * which would flicker the text on every noisy sample instead
+             * of holding it through proberecover like the color's own
+             * recv_over/peer_over already do further down. */
+            const int degraded = rows[g].path.group_probe_degraded ||
+                                  rows[g].path.group_peer_probe_degraded;
             const int recv_over = rows[g].path.group_probe_loss >
                                    rows[g].path.conf.loss_limit;
             const int peer_over = rows[g].path.group_peer_probe_loss >
