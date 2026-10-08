@@ -1,0 +1,1264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glorytun User Guide</title>
+<style>
+  :root {
+    --bg: #F6F4EF;
+    --surface: #ECE9E1;
+    --surface-2: #E2DDD0;
+    --text: #201D18;
+    --text-dim: #6B6357;
+    --accent: #B96E1F;
+    --accent-soft: #F1DFC6;
+    --border: #DAD5C9;
+    --ok: #4B7A56;
+    --warn: #A66512;
+    --crit: #A8483A;
+    --info: #3F6A8C;
+    --code-bg: #FBFAF7;
+    --term-bg: #1B1F26;
+    --term-text: #E6E3DC;
+    --term-dim: #8A8F9A;
+    --term-accent: #E0A263;
+    --serif: Georgia, "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+    --sans: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14181F; --surface: #1B212A; --surface-2: #232A35;
+      --text: #E8E6E1; --text-dim: #8B93A1; --accent: #E0A263; --accent-soft: #3A2D1F;
+      --border: #2A303C; --ok: #7FB88C; --warn: #E0A263; --crit: #D08276; --info: #7FAACB;
+      --code-bg: #10141A; --term-bg: #0C0F14;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14181F; --surface: #1B212A; --surface-2: #232A35;
+    --text: #E8E6E1; --text-dim: #8B93A1; --accent: #E0A263; --accent-soft: #3A2D1F;
+    --border: #2A303C; --ok: #7FB88C; --warn: #E0A263; --crit: #D08276; --info: #7FAACB;
+    --code-bg: #10141A; --term-bg: #0C0F14;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 1rem; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--serif); font-size: 17px; line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+
+  .layout {
+    display: grid; grid-template-columns: 260px minmax(0, 1fr);
+    max-width: 1240px; margin: 0 auto;
+  }
+  nav.toc {
+    position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto;
+    padding: 2rem 1.1rem 2rem 1.5rem; border-right: 1px solid var(--border);
+    font-family: var(--sans); font-size: 0.86rem;
+  }
+  .brand { font-family: var(--mono); font-weight: 700; font-size: 1.1rem; color: var(--accent); }
+  .brand small {
+    display: block; font-family: var(--sans); font-weight: 400; font-size: 0.7rem;
+    letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); margin-top: 0.15rem;
+  }
+  nav.toc ol { list-style: none; margin: 1.4rem 0 0; padding: 0; }
+  nav.toc li { margin: 0; }
+  nav.toc a {
+    display: block; padding: 0.28rem 0.5rem; margin-left: -0.5rem;
+    color: var(--text-dim); text-decoration: none; border-radius: 4px;
+  }
+  nav.toc a:hover { color: var(--text); background: var(--surface); }
+  nav.toc li.sub a { padding-left: 1.3rem; font-size: 0.8rem; }
+  .theme-btn {
+    margin-top: 1.5rem; font: inherit; font-size: 0.78rem; color: var(--text-dim);
+    background: transparent; border: 1px solid var(--border); border-radius: 4px;
+    padding: 0.3rem 0.7rem; cursor: pointer;
+  }
+
+  main { padding: 3rem 2.5rem 6rem; min-width: 0; max-width: 62rem; }
+  h1 { font-size: 2.5rem; line-height: 1.1; margin: 0 0 0.5rem; text-wrap: balance; }
+  h2 {
+    font-size: 1.75rem; line-height: 1.2; margin: 4rem 0 1rem; padding-top: 1.5rem;
+    border-top: 1px solid var(--border); text-wrap: balance;
+  }
+  h3 { font-size: 1.28rem; line-height: 1.25; margin: 2.4rem 0 0.6rem; text-wrap: balance; }
+  h4 {
+    font-family: var(--sans); font-size: 0.78rem; letter-spacing: 0.07em;
+    text-transform: uppercase; color: var(--text-dim); margin: 1.6rem 0 0.4rem;
+  }
+  p { margin: 0 0 1rem; }
+  ul, ol { padding-left: 1.4rem; margin: 0 0 1rem; }
+  li { margin: 0.25rem 0; }
+  .lede { font-size: 1.15rem; color: var(--text-dim); max-width: 44rem; }
+  .meta {
+    font-family: var(--sans); font-size: 0.82rem; color: var(--text-dim);
+    margin: 0.5rem 0 2rem;
+  }
+
+  code, kbd {
+    font-family: var(--mono); font-size: 0.86em; background: var(--surface);
+    padding: 0.08em 0.38em; border-radius: 4px;
+  }
+  pre {
+    position: relative; margin: 0 0 1.2rem; padding: 0.95rem 1.1rem;
+    background: var(--term-bg); color: var(--term-text); border-radius: 8px;
+    overflow-x: auto; font-family: var(--mono); font-size: 0.83rem; line-height: 1.55;
+    border: 1px solid var(--border);
+  }
+  pre code { background: none; padding: 0; font-size: inherit; color: inherit; }
+  pre .c { color: var(--term-dim); }
+  pre .p { color: var(--term-accent); user-select: none; }
+  pre .ok { color: #8FD19E; }
+  pre .wn { color: #E8B35C; }
+  pre .er { color: #E58B7C; }
+  pre[data-label]::before {
+    content: attr(data-label); display: block; font-family: var(--sans); font-size: 0.68rem;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--term-dim);
+    margin-bottom: 0.5rem;
+  }
+  .copy {
+    position: absolute; top: 0.5rem; right: 0.5rem; font: 0.7rem var(--sans);
+    color: var(--term-dim); background: transparent; border: 1px solid #3a4150;
+    border-radius: 4px; padding: 0.15rem 0.5rem; cursor: pointer;
+  }
+  .copy:hover { color: var(--term-text); }
+
+  table {
+    width: 100%; border-collapse: collapse; margin: 0 0 1.4rem;
+    font-family: var(--sans); font-size: 0.88rem; line-height: 1.45;
+  }
+  th, td { text-align: left; vertical-align: top; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border); }
+  th { background: var(--surface); font-size: 0.74rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-dim); }
+  td code { white-space: nowrap; }
+  .tablewrap { overflow-x: auto; }
+
+  .callout {
+    font-family: var(--sans); font-size: 0.92rem; line-height: 1.55;
+    padding: 0.8rem 1rem; margin: 0 0 1.3rem; border-radius: 6px;
+    border-left: 4px solid var(--info); background: var(--surface);
+  }
+  .callout strong:first-child { display: block; font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 0.15rem; }
+  .callout.note { border-left-color: var(--info); }
+  .callout.tip { border-left-color: var(--ok); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.danger { border-left-color: var(--crit); }
+  .callout p:last-child { margin-bottom: 0; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 0.9rem; margin: 0 0 1.5rem; }
+  .card {
+    font-family: var(--sans); font-size: 0.9rem; padding: 0.9rem 1rem;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .card h4 { margin: 0 0 0.3rem; color: var(--accent); }
+  .card p { margin: 0; }
+
+  figure { margin: 0 0 1.6rem; }
+  figure svg { width: 100%; height: auto; display: block; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+  figcaption { font-family: var(--sans); font-size: 0.8rem; color: var(--text-dim); margin-top: 0.4rem; }
+  svg text { font-family: var(--sans); fill: var(--text); }
+  svg .dim { fill: var(--text-dim); }
+  svg .box { fill: var(--bg); stroke: var(--border); stroke-width: 1.2; }
+  svg .hot { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; }
+  svg .ln { stroke: var(--text-dim); stroke-width: 1.4; fill: none; }
+  svg .lnh { stroke: var(--accent); stroke-width: 1.8; fill: none; }
+
+  details {
+    border: 1px solid var(--border); border-radius: 6px; margin: 0 0 1rem;
+    background: var(--surface); font-family: var(--sans); font-size: 0.92rem;
+  }
+  summary { cursor: pointer; padding: 0.6rem 0.9rem; font-weight: 600; }
+  details > div { padding: 0 0.9rem 0.8rem; }
+  details pre { margin-top: 0.4rem; }
+
+  dl.opts { margin: 0 0 1.4rem; font-family: var(--sans); font-size: 0.92rem; }
+  dl.opts dt { font-family: var(--mono); font-weight: 600; margin-top: 0.9rem; color: var(--accent); }
+  dl.opts dd { margin: 0.15rem 0 0 0; padding-left: 1rem; border-left: 2px solid var(--border); }
+
+  .tag {
+    display: inline-block; font-family: var(--sans); font-size: 0.68rem; letter-spacing: 0.05em;
+    text-transform: uppercase; padding: 0.05rem 0.45rem; border-radius: 3px;
+    background: var(--accent-soft); color: var(--accent); vertical-align: middle;
+  }
+
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border); padding: 1.2rem 1rem; }
+    main { padding: 1.5rem 1rem 4rem; }
+    h1 { font-size: 2rem; }
+  }
+  @media print {
+    nav.toc, .copy, .theme-btn { display: none; }
+    .layout { display: block; }
+    pre { white-space: pre-wrap; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc" aria-label="Contents">
+  <div class="brand">glorytun<small>User Guide</small></div>
+  <ol>
+    <li><a href="#overview">1. Overview</a></li>
+    <li><a href="#design">2. How it works</a></li>
+    <li class="sub"><a href="#design-flow">Packet journey</a></li>
+    <li class="sub"><a href="#design-crypto">Crypto &amp; keys</a></li>
+    <li class="sub"><a href="#design-paths">Paths &amp; scheduling</a></li>
+    <li class="sub"><a href="#design-subflows">Sub-flows</a></li>
+    <li class="sub"><a href="#design-health">Health &amp; failover</a></li>
+    <li class="sub"><a href="#design-rate">Rate control</a></li>
+    <li class="sub"><a href="#design-mtu">MTU</a></li>
+    <li class="sub"><a href="#design-reorder">Reordering</a></li>
+    <li class="sub"><a href="#design-threads">Threads &amp; control plane</a></li>
+    <li><a href="#install">3. Install</a></li>
+    <li><a href="#quickstart">4. Quick start</a></li>
+    <li><a href="#commands">5. Command reference</a></li>
+    <li class="sub"><a href="#cmd-conventions">Syntax conventions</a></li>
+    <li class="sub"><a href="#cmd-keygen">keygen</a></li>
+    <li class="sub"><a href="#cmd-bind">bind</a></li>
+    <li class="sub"><a href="#cmd-list">list</a></li>
+    <li class="sub"><a href="#cmd-show">show</a></li>
+    <li class="sub"><a href="#cmd-set">set</a></li>
+    <li class="sub"><a href="#cmd-path">path</a></li>
+    <li class="sub"><a href="#cmd-bench">bench</a></li>
+    <li class="sub"><a href="#cmd-version">version</a></li>
+    <li><a href="#choosing">6. Choosing settings</a></li>
+    <li><a href="#recipes">7. Deployment recipes</a></li>
+    <li><a href="#systemd">8. Running under systemd</a></li>
+    <li><a href="#reading">9. Reading the output</a></li>
+    <li><a href="#troubleshooting">10. Troubleshooting</a></li>
+    <li><a href="#security">11. Security notes</a></li>
+    <li><a href="#cheatsheet">12. Cheat sheet</a></li>
+    <li><a href="#limits">Appendix: defaults &amp; limits</a></li>
+  </ol>
+  <button class="theme-btn" id="themeBtn" type="button">Toggle theme</button>
+</nav>
+
+<main>
+
+<h1>Glorytun User Guide</h1>
+<p class="lede">A small, fast, encrypted multipath UDP tunnel. This guide explains how it is built, how to deploy it, what every command does and what its output looks like, and how to pick settings that suit your network.</p>
+<p class="meta">Applies to the fork documented in this repository (reports <code>glorytun 1.0</code>). Commands and flags were checked against the source code.</p>
+
+<div class="callout note">
+  <strong>About the example output</strong>
+  <p>Output layouts shown here come directly from the program's print statements. The <em>numbers</em> in them (addresses, speeds, PIDs, round-trip times) are illustrative &mdash; yours will differ. Lines beginning with <code>$</code> or <code>#</code> are commands you type; <code>#</code> means "as root".</p>
+</div>
+
+<!-- ============================================================== -->
+<h2 id="overview">1. Overview</h2>
+
+<p>Glorytun creates a virtual network interface (a <em>TUN device</em>) on two machines. Anything you send into that interface on one machine comes out of the same-named interface on the other, encrypted and authenticated in transit. Between the two machines it travels as UDP datagrams, and it can use <strong>several network links at once</strong> &mdash; for example a fibre line, a DSL line and an LTE modem &mdash; so a single connection can use their combined bandwidth and survive any one of them failing.</p>
+
+<div class="cards">
+  <div class="card"><h4>Multipath</h4><p>Packets are spread across all healthy links in proportion to each link's capacity. A dead link is dropped automatically and re-added when it recovers.</p></div>
+  <div class="card"><h4>Failover &amp; backup</h4><p>Mark links as primary or backup with <code>pref</code>. Backups carry traffic only when nothing preferred is working.</p></div>
+  <div class="card"><h4>Secure by default</h4><p>AEGIS-256 (or ChaCha20-Poly1305 fallback), Curve25519 key exchange with perfect forward secrecy, hourly key rotation, timestamp checks.</p></div>
+  <div class="card"><h4>Multi-core</h4><p>Several worker threads run the whole packet pipeline in parallel; a multi-queue TUN spreads the load further on Linux.</p></div>
+  <div class="card"><h4>Sub-flows</h4><p>Split one link into N parallel UDP flows (<code>connections N</code>) to fill long, high-latency pipes.</p></div>
+  <div class="card"><h4>Operator-controlled</h4><p>Fixed MTU, rate limits and loss/RTT limits are explicit settings &mdash; no hidden probing that can mislead you.</p></div>
+</div>
+
+<h3>What Glorytun is and is not</h3>
+<ul>
+  <li><strong>It is</strong> a point-to-point layer-3 tunnel: exactly two peers, one pre-shared key.</li>
+  <li><strong>It is not</strong> a mesh VPN, does not hand out IP addresses, set up routes, or configure NAT or firewalls. You assign addresses and routes with ordinary tools (<code>ip</code>, systemd-networkd, &hellip;).</li>
+  <li><strong>It has no configuration file.</strong> Everything is given on the command line when you start it, and changed at run time with <code>set</code> and <code>path</code>. Wrapper scripts or systemd units make it permanent.</li>
+  <li>Linux is the primary platform. macOS and the BSDs are supported for the core tunnel; interface tracking (<code>via</code>), multi-queue TUN, <code>cpus</code> and the systemd files are Linux-only.</li>
+</ul>
+
+<h3>Roles: server and client</h3>
+<p>The two ends are symmetric once connected, but they behave differently at start-up:</p>
+<ul>
+  <li>The <strong>server</strong> (passive side) simply listens on a UDP port. It does not need to know the client's addresses; it <em>discovers</em> every path the client uses by looking at where valid packets come from.</li>
+  <li>The <strong>client</strong> (active side) is told where the server is (<code>to addr&hellip; port&hellip;</code>) and which local links to use (<code>path up via&hellip;</code>). It starts the conversation.</li>
+</ul>
+<p>Per-path health, rate and MTU settings configured on the client are carried to the server inside the encrypted control messages, so the server normally needs no per-path configuration at all.</p>
+
+<!-- ============================================================== -->
+<h2 id="design">2. How it works</h2>
+
+<figure>
+<svg viewBox="0 0 900 360" role="img" aria-label="Glorytun architecture: applications to TUN device to worker threads to UDP sockets over several links to the peer">
+  <rect class="box" x="20" y="40" width="130" height="64" rx="8"/><text x="85" y="68" text-anchor="middle" font-size="13" font-weight="600">Applications</text><text x="85" y="86" text-anchor="middle" font-size="11" class="dim">ping, ssh, web&hellip;</text>
+  <rect class="box" x="20" y="150" width="130" height="64" rx="8"/><text x="85" y="178" text-anchor="middle" font-size="13" font-weight="600">TUN device</text><text x="85" y="196" text-anchor="middle" font-size="11" class="dim">gt0 (inner IP)</text>
+  <rect class="hot" x="210" y="110" width="280" height="150" rx="10"/>
+  <text x="350" y="134" text-anchor="middle" font-size="13" font-weight="600">glorytun bind (one process)</text>
+  <rect class="box" x="226" y="148" width="248" height="46" rx="6"/><text x="350" y="168" text-anchor="middle" font-size="12" font-weight="600">N worker threads</text><text x="350" y="184" text-anchor="middle" font-size="10.5" class="dim">read &middot; encrypt &middot; pick path &middot; send  /  receive &middot; decrypt &middot; write</text>
+  <rect class="box" x="226" y="202" width="248" height="46" rx="6"/><text x="350" y="222" text-anchor="middle" font-size="12" font-weight="600">Housekeeping thread</text><text x="350" y="238" text-anchor="middle" font-size="10.5" class="dim">timers &middot; keys &middot; health &middot; control socket &middot; netlink</text>
+  <rect class="box" x="560" y="30" width="150" height="46" rx="8"/><text x="635" y="57" text-anchor="middle" font-size="12">UDP socket, link A</text>
+  <rect class="box" x="560" y="96" width="150" height="46" rx="8"/><text x="635" y="123" text-anchor="middle" font-size="12">UDP socket, link B</text>
+  <rect class="box" x="560" y="162" width="150" height="46" rx="8"/><text x="635" y="189" text-anchor="middle" font-size="12">UDP sub-flows (A&middot;2..N)</text>
+  <rect class="box" x="560" y="228" width="150" height="46" rx="8"/><text x="635" y="255" text-anchor="middle" font-size="12">monitor probe flow</text>
+  <rect class="box" x="760" y="110" width="120" height="100" rx="8"/><text x="820" y="153" text-anchor="middle" font-size="13" font-weight="600">Peer</text><text x="820" y="171" text-anchor="middle" font-size="11" class="dim">same pipeline,</text><text x="820" y="186" text-anchor="middle" font-size="11" class="dim">mirrored</text>
+  <path class="ln" d="M85 104 V150"/><path class="lnh" d="M150 182 H210"/>
+  <path class="lnh" d="M490 170 C525 170 525 53 560 53"/><path class="lnh" d="M490 175 C525 175 525 119 560 119"/><path class="lnh" d="M490 180 C525 180 525 185 560 185"/><path class="ln" d="M490 190 C525 190 525 251 560 251"/>
+  <path class="lnh" d="M710 53 C735 53 735 140 760 140"/><path class="lnh" d="M710 119 H760"/><path class="lnh" d="M710 185 C735 185 735 180 760 180"/><path class="ln" d="M710 251 C735 251 735 200 760 200"/>
+  <text x="350" y="300" text-anchor="middle" font-size="11" class="dim">Control socket (Unix datagram) &larr; list / show / set / path commands</text>
+  <text x="635" y="310" text-anchor="middle" font-size="11" class="dim">encrypted UDP over the Internet</text>
+  <path class="ln" d="M350 262 V285" stroke-dasharray="4 3"/>
+</svg>
+<figcaption>Everything runs inside the single <code>glorytun bind</code> process. Short-lived CLI commands talk to it through a local control socket.</figcaption>
+</figure>
+
+<h3 id="design-flow">2.1 The journey of a packet</h3>
+<p><strong>Sending side:</strong></p>
+<ol>
+  <li>An application sends a packet to an address routed into the TUN device. A worker thread reads it from the TUN.</li>
+  <li>If the tunnel's rate allowance is exhausted, the worker sleeps 1&nbsp;ms and tries again (back-pressure instead of burning CPU).</li>
+  <li>The packet is encrypted and authenticated. A 6-byte timestamp (also used as the cipher nonce) goes in front and a 16-byte authentication tag is added.</li>
+  <li>A path is chosen for <em>that individual packet</em> by a weighted random pick (see <a href="#design-paths">paths &amp; scheduling</a>).</li>
+  <li>The datagram is sent from the chosen local socket, with the chosen source address and interface pinned using packet-info control data.</li>
+</ol>
+<p><strong>Receiving side:</strong></p>
+<ol>
+  <li>A datagram arrives on one of the UDP sockets. Packets are pulled in batches of up to 16.</li>
+  <li>Its timestamp is checked against the local clock (default tolerance: 10&nbsp;minutes). Outside the window it is dropped and counted as a <em>clocksync</em> error.</li>
+  <li>It is decrypted. If authentication fails it is dropped and counted as a <em>decrypt</em> error.</li>
+  <li>The path it arrived on is looked up (or created automatically on a passive peer).</li>
+  <li>Control messages are processed internally. Data packets are checked to be well-formed IPv4/IPv6 (version and length fields must match the size received) and written to the TUN device, where the kernel takes over.</li>
+</ol>
+
+<h3 id="design-crypto">2.2 Cryptography and key management</h3>
+<div class="tablewrap"><table>
+  <tr><th>Item</th><th>Detail</th></tr>
+  <tr><td>Cipher</td><td>AEGIS-256 when both CPUs support AES instructions; otherwise ChaCha20-Poly1305 (libsodium). Each side advertises what it supports and AEGIS is used only if both agree. <code>bind chacha</code> forces the fallback.</td></tr>
+  <tr><td>Pre-shared key</td><td>32 bytes, shared out of band. Used to encrypt/authenticate <em>control</em> messages and as the base for key exchange. Whoever holds it can join the tunnel.</td></tr>
+  <tr><td>Session keys</td><td>Each side generates an ephemeral Curve25519 key pair and sends the public half in control messages. Both derive per-direction data keys from the ECDH result and both public keys with a keyed BLAKE2b hash. Compromise of the pre-shared key later does not reveal past traffic (perfect forward secrecy).</td></tr>
+  <tr><td>Rotation</td><td>New key pairs are generated every <code>kxtimeout</code> (default 1&nbsp;hour). The next key is derived in advance so traffic keeps flowing during the switch; the receiver tries current, next, last and finally the pre-shared key.</td></tr>
+  <tr><td>Timestamps</td><td>Every packet carries a microsecond timestamp. Packets outside <code>timetolerance</code> (default 10&nbsp;minutes) are rejected, limiting replay. <strong>Both machines must keep reasonably correct clocks</strong> (NTP).</td></tr>
+</table></div>
+
+<h3 id="design-paths">2.3 Paths and scheduling</h3>
+<p>A <strong>path</strong> is one (local interface/address, remote address, local socket) combination. Paths are created in two ways:</p>
+<ul>
+  <li><strong>Active:</strong> by you, with <code>glorytun path up&hellip;</code> (usually on the client).</li>
+  <li><strong>Passive:</strong> automatically, the first time a valid packet arrives from a new source. This is how the server learns the client's links. Passive paths that stay silent for 5&nbsp;minutes are removed.</li>
+</ul>
+<p>Each path goes through states you will see in <code>glorytun path</code>: <code>probing</code> &rarr; <code>running</code> (or <code>ready</code> for a backup), and drops to <code>degraded</code>, <code>lossy</code>, <code>late</code> or <code>waiting</code> when something is wrong (see <a href="#reading">section 9</a>).</p>
+
+<p><strong>Scheduling is per packet, not per connection.</strong> For each outgoing packet a pseudo-random number (taken from the encrypted bytes) is mapped over the weights of all <code>running</code> data paths, so traffic splits roughly in proportion to each link's rate. The weight of a path is the average rate of all sub-flows on the same physical link, so every sub-flow of a link gets an equal share while different links share by capacity.</p>
+
+<p><strong>Preference.</strong> Every path has <code>pref</code> (0&ndash;127, lower is better). Only paths at the best preference level that currently has a working path carry traffic; worse ones sit in <code>ready</code> as warm standby and take over as soon as no better path is running.</p>
+
+<h3 id="design-subflows">2.4 Sockets and sub-flows (<code>connections N</code>)</h3>
+<p>One TCP connection over one UDP flow is often limited by a single link's bandwidth-delay product, and many carriers and kernels treat a single flow as one unit (one hash bucket, one CPU core). <code>connections N</code> opens <em>N</em> UDP sockets with different source ports on the same interface and treats each as a sub-flow of the same link. They are load-balanced evenly, which helps fill long, fat links and spreads receive work across CPU cores. The peer needs no setting: it just sees N more source ports.</p>
+<p>Internally the program also keeps a pool of sockets that all listen on the <em>same</em> port (kernel <code>SO_REUSEPORT</code>), so a server with many incoming flows spreads receive work across its workers. Once a passive path proves it is alive it is moved to its own connected socket. This is why the socket numbers shown by <code>glorytun path</code> start well above 0 (see <a href="#reading">section 9</a>).</p>
+
+<h3 id="design-health">2.5 Health monitoring and failover</h3>
+<p>Detecting a link that is up but dropping packets needs measurement that does not depend on how much data happens to be flowing. Glorytun uses a dedicated <strong>monitor</strong> sub-flow per physical link:</p>
+<ul>
+  <li>It carries <em>no user data</em>. It sends a tiny, sequence-numbered probe at a fixed interval (default 1&nbsp;second).</li>
+  <li>The receiver counts missing sequence numbers over the last <code>probewindow</code> probes (default 60) &mdash; that is the loss percentage.</li>
+  <li>Each probe also reports the sender's own view of what <em>it</em> receives. This matters: whether to keep sending on a link depends on whether the <em>peer</em> hears you, so the decision to mark a link <code>lossy</code> is made from the peer's report of loss in your sending direction.</li>
+  <li>Degradation is fast (the moment loss exceeds <code>losslimit</code>); recovery is slow (loss must stay below the limit for <code>proberecover</code>, default 60&nbsp;seconds) to stop flapping.</li>
+  <li>If a monitor hears nothing for a whole window, the link is treated as 100% lossy.</li>
+  <li>Settings given on the client (<code>probeinterval</code>, <code>probewindow</code>, <code>proberecover</code>, <code>losslimit</code>, <code>rttlimit</code>) are propagated to the server automatically.</li>
+</ul>
+<div class="callout warn">
+  <strong>Add <code>monitor</code> on every link</strong>
+  <p>Without a monitor, loss-based failover cannot trigger: <code>losslimit</code> has nothing to measure and <code>glorytun path</code> shows <code>probe-status no-monitor</code>. Links are still marked <code>degraded</code> when the peer stops answering altogether, and <code>late</code> when RTT exceeds <code>rttlimit</code>, but a link that merely drops a fraction of packets will keep being used.</p>
+</div>
+
+<h3 id="design-rate">2.6 Rate control and shaping</h3>
+<p>Each path has a transmit rate that the scheduler uses as its weight and that also limits how fast the tunnel as a whole may send (a token-bucket window refilled at the sum of running rates, capped to about 100&nbsp;ms of data).</p>
+<ul>
+  <li><strong><code>rate fixed tx X</code></strong> &mdash; use exactly <code>X</code> as the ceiling. Predictable; recommended when you know your line speed.</li>
+  <li><strong><code>rate auto</code></strong> (default) &mdash; start at about 1&nbsp;Mbit/s and grow by roughly 10% per measurement while the path is not congested, backing off to ~7/8 of the rate the peer actually observes when it is. A <code>tx</code> value, if given, is the upper cap. Marked experimental.</li>
+  <li><strong><code>rx X</code></strong> is sent to the peer: it tells the other side how fast it may send <em>to you</em>. So you limit your inbound traffic by setting <code>rx</code> on your own side, and your outbound with <code>tx</code>.</li>
+  <li>An explicitly set <code>tx</code> is <em>pinned</em>: the peer's advertisements can no longer overwrite it.</li>
+</ul>
+<p>Rates are stored as bytes per second. You can write them in bits or bytes with suffixes (see <a href="#cmd-path">path</a>). Good shaping (setting rates a little below real capacity) keeps queues, and therefore latency, small.</p>
+
+<h3 id="design-mtu">2.7 MTU</h3>
+<p>There is <strong>no MTU discovery</strong>. Each path sends datagrams of one fixed size &mdash; its <code>mtu</code> setting (default <strong>1400</strong> bytes of UDP payload) &mdash; and never changes it automatically. If you set <code>mtu</code> on one end, it is advertised and adopted by a peer path that has none of its own.</p>
+<ul>
+  <li>The tunnel interface MTU is automatically set to the <em>smallest</em> path MTU of any up path, minus 22 bytes (6 timestamp + 16 tag). The default is therefore <strong>1378</strong>.</li>
+  <li>The outer packet on the wire is <code>mtu</code> + 8 (UDP) + 20 (IPv4) or 40 (IPv6). With 1400 that is 1428 / 1448 bytes, safe for 1500-byte Ethernet and for PPPoE (1492).</li>
+  <li>If your underlying links are plain Ethernet you may raise <code>mtu</code> to at most 1472 (IPv4) or 1452 (IPv6) to save overhead.</li>
+  <li>When packet resequencing (<code>reorderwindow</code>) is active, some packets are 4 bytes larger; leave a little headroom if you push the MTU to the limit.</li>
+</ul>
+
+<h3 id="design-reorder">2.8 Packet reordering (optional)</h3>
+<p>Because packets of one flow are sprayed over links with different latency, they may arrive out of order. TCP interprets reordering as loss and slows down, so a single download can be much slower than the sum of the links. <code>glorytun set reorderwindow DURATION</code> (off by default) turns on a resequencing buffer on the receiving side:</p>
+<ul>
+  <li>Non-TCP traffic (UDP, ICMP, &hellip;) is numbered by the sender (4 extra encrypted bytes), and the receiver releases packets strictly in order, waiting only for a number that is genuinely missing, for no longer than the window. An in-order packet is never delayed.</li>
+  <li>TCP is not numbered (it already tolerates reordering) but is held for a time derived from the measured RTT difference between the arriving path and the slowest path.</li>
+  <li>The setting is per direction: configure it on the machine that <em>receives</em> the reordered traffic. The peer is told through the control messages.</li>
+  <li>It never drops packets; if the buffer is full or a packet is too large, it is delivered immediately.</li>
+</ul>
+<p>The cost is added latency (up to the window) on traffic that was out of order. See <a href="#choosing">section 6</a> for sizing.</p>
+
+<h3 id="design-threads">2.9 Threads, interface tracking and the control plane</h3>
+<ul>
+  <li><strong>Workers.</strong> By default <em>cores &minus; 1</em> threads (at least 1, at most 32), each running the entire pipeline with no hand-offs. Override with <code>bind workers N</code> or confine to specific cores with <code>bind cpus</code>.</li>
+  <li><strong>Locks.</strong> Two short-held mutexes protect shared state; neither is held during a system call or while encrypting, so crypto runs fully in parallel.</li>
+  <li><strong>Housekeeping thread.</strong> About ten times a second: timers, keepalives, key rotation, health, rate and MTU updates. It also serves control requests.</li>
+  <li><strong>Interface tracking (Linux).</strong> Paths created with <code>via INTERFACE</code> remember the interface <em>name</em>. A netlink subscription notices link up/down and address changes. If the link goes down the path is suspended; when it returns (even with a new IP, such as an LTE modem reconnecting) the path is re-bound automatically and re-measured. Your configuration is kept.</li>
+  <li><strong>Control socket.</strong> A Unix datagram socket named after the TUN device, in a per-user runtime directory (mode 0700). The CLI commands connect to it, so <strong>run management commands as the same user</strong> that started the tunnel (normally <code>sudo</code>). The directory is the first usable of <code>/run/user/&lt;uid&gt;/glorytun</code>, <code>/run/glorytun.&lt;uid&gt;</code>, <code>/var/run/glorytun.&lt;uid&gt;</code>, <code>/tmp/glorytun.&lt;uid&gt;</code>.</li>
+</ul>
+
+<!-- ============================================================== -->
+<h2 id="install">3. Install</h2>
+
+<h3>Requirements</h3>
+<ul>
+  <li>A C compiler and <code>make</code> (or Meson + Ninja), and <code>git</code>.</li>
+  <li><code>libsodium</code> 1.0.4 or newer, with development headers.</li>
+  <li>Linux with TUN support (<code>/dev/net/tun</code>) and root or <code>CAP_NET_ADMIN</code> to run a tunnel. Building, <code>keygen</code>, <code>version</code> and <code>bench</code> need no privileges.</li>
+  <li>Accurate clocks on both machines.</li>
+</ul>
+
+<h3>Build</h3>
+<pre data-label="Get the source (includes the argz and mud submodules)"><code><span class="p">$</span> git clone --recurse-submodules https://github.com/angt/glorytun.git
+<span class="p">$</span> cd glorytun
+<span class="c"># already cloned without submodules?</span>
+<span class="p">$</span> git submodule update --init --recursive</code></pre>
+
+<pre data-label="Option A: Meson"><code><span class="p">$</span> meson setup build
+<span class="p">$</span> meson compile -C build
+<span class="p">$</span> sudo meson install -C build        <span class="c"># optional: installs binary + systemd files</span></code></pre>
+
+<pre data-label="Option B: plain make, using the system libsodium"><code><span class="p">$</span> make CPPFLAGS="$(pkg-config --cflags libsodium)" \
+       LDFLAGS="$(pkg-config --libs-only-L libsodium)" \
+       LDLIBS="$(pkg-config --libs-only-l libsodium)"</code></pre>
+
+<pre data-label="Option C: private static libsodium (also for cross-compiling)"><code><span class="p">$</span> ./sodium.sh                         <span class="c"># or: ./sodium.sh aarch64-linux-gnu-</span>
+<span class="p">$</span> make                                <span class="c"># or: make X=aarch64-linux-gnu-</span></code></pre>
+
+<pre data-label="Verify"><code><span class="p">$</span> ./glorytun version
+glorytun 1.0
+libsodium 26.1</code></pre>
+<p>The second line is the libsodium library version your binary is linked against, so it will differ by system.</p>
+
+<!-- ============================================================== -->
+<h2 id="quickstart">4. Quick start: two machines in ten minutes</h2>
+
+<p>Scenario: a <strong>server</strong> with public address <code>203.0.113.10</code> and a <strong>client</strong> behind a normal connection on interface <code>eth0</code>. The tunnel uses the private network <code>10.77.0.0/30</code>, UDP port <code>5000</code>, and device name <code>gt0</code> on both ends.</p>
+
+<h3>Step 1 &mdash; Create the shared key (once)</h3>
+<pre><code><span class="p">$</span> install -d -m 700 secrets
+<span class="p">$</span> ./glorytun keygen > secrets/glorytun.key
+<span class="p">$</span> chmod 600 secrets/glorytun.key
+<span class="p">$</span> cat secrets/glorytun.key
+9F3A61C0D2B84E57A1F0C3D9E6B2748A5D01CE93F7B6A42E8D5C1B0A3F7E9D62</code></pre>
+<p>Copy the same file to the other machine over a secure channel (e.g. <code>scp</code>). Never post it or commit it to version control.</p>
+
+<h3>Step 2 &mdash; Start the server</h3>
+<p>Open UDP port 5000 in the server's firewall first.</p>
+<pre data-label="server"><code><span class="p">#</span> ./glorytun bind dev gt0 keyfile secrets/glorytun.key from addr 0.0.0.0 port 5000
+running on device gt0 as pid 2417</code></pre>
+<p>This command stays in the foreground and prints log messages to the terminal. Use another terminal for the next steps (or run it under systemd, see <a href="#systemd">section 8</a>).</p>
+
+<h3>Step 3 &mdash; Give the server's tunnel interface an address</h3>
+<pre data-label="server, second terminal"><code><span class="p">#</span> ip address add 10.77.0.1/30 dev gt0
+<span class="p">#</span> ip link set gt0 up</code></pre>
+
+<h3>Step 4 &mdash; Start the client</h3>
+<pre data-label="client"><code><span class="p">#</span> ./glorytun bind dev gt0 keyfile secrets/glorytun.key \
+      from addr 0.0.0.0 port 0 \
+      to addr 203.0.113.10 port 5000
+running on device gt0 as pid 981</code></pre>
+<p>Local port <code>0</code> lets the operating system choose a free port.</p>
+
+<h3>Step 5 &mdash; Address the client's interface and add its link</h3>
+<pre data-label="client, second terminal"><code><span class="p">#</span> ip address add 10.77.0.2/30 dev gt0
+<span class="p">#</span> ip link set gt0 up
+
+<span class="c"># Tell glorytun which local link to use, and cap it (see section 6 for how to pick values)</span>
+<span class="p">#</span> ./glorytun path up via eth0 dev gt0 monitor rate fixed tx 50mbit rx 100mbit
+path dev gt0 via eth0 to addr 203.0.113.10 port 5000 set up pref 0 beat 100ms losslimit 100% rttlimit off mtu 0 rate fixed tx 50Mbits rx 100Mbits  monitor</code></pre>
+<p>The command prints the configuration it applied. <code>mtu 0</code> means "use the default (1400)".</p>
+
+<h3>Step 6 &mdash; Check that it works</h3>
+<pre data-label="client"><code><span class="p">#</span> ./glorytun path dev gt0
+eth0  index 2  192.168.1.20 -> 203.0.113.10:5000  rtt 18.402  tx -  rx -  recv-loss 0.00  peer-loss 0.00  probe-status <span class="ok">healthy</span>
+  ├─ 16  running   monitor  tx -  rx -  rtt 18.402  mtu 1400  public 198.51.100.7:41873
+  └─ 17  running   tx -  rx -  rtt 18.311  mtu 1400  public 198.51.100.7:48155
+
+<span class="p">#</span> ping -c 3 10.77.0.1
+64 bytes from 10.77.0.1: icmp_seq=1 ttl=64 time=19.2 ms
+64 bytes from 10.77.0.1: icmp_seq=2 ttl=64 time=18.7 ms
+64 bytes from 10.77.0.1: icmp_seq=3 ttl=64 time=18.9 ms</code></pre>
+<p>If both rows say <code>running</code> and ping works, you have a tunnel. If not, see <a href="#troubleshooting">Troubleshooting</a>.</p>
+
+<h3>Step 7 &mdash; Send real traffic through it</h3>
+<p>Glorytun only provides the pipe. To use it as an Internet gateway for the client, the server needs IP forwarding and NAT, and the client needs a default route through <code>10.77.0.1</code> plus a host route that keeps the packets to <code>203.0.113.10</code> going out of <code>eth0</code> (otherwise the tunnel's own packets would loop into the tunnel). A typical set:</p>
+<pre data-label="server"><code><span class="p">#</span> sysctl -w net.ipv4.ip_forward=1
+<span class="p">#</span> iptables -t nat -A POSTROUTING -s 10.77.0.0/30 -o eth0 -j MASQUERADE</code></pre>
+<pre data-label="client"><code><span class="c"># keep the path to the server outside the tunnel (use your real gateway)</span>
+<span class="p">#</span> ip route add 203.0.113.10/32 via 192.168.1.1 dev eth0
+<span class="c"># send everything else through the tunnel</span>
+<span class="p">#</span> ip route add 0.0.0.0/1 via 10.77.0.1
+<span class="p">#</span> ip route add 128.0.0.0/1 via 10.77.0.1</code></pre>
+<p>Using two <code>/1</code> routes overrides the default route without deleting it, so removing them restores normal connectivity instantly.</p>
+
+<h3>Step 8 &mdash; Stop</h3>
+<p>Press <kbd>Ctrl-C</kbd> (or send <code>SIGTERM</code>) in the terminal running <code>bind</code>. The TUN interface disappears unless you started with <code>persist</code>.</p>
+
+<!-- ============================================================== -->
+<h2 id="commands">5. Command reference</h2>
+
+<p>The program is one binary with eight commands. Running <code>glorytun</code> with no arguments lists them:</p>
+<pre><code><span class="p">$</span> glorytun
+  option                     description
+  list                       List all tunnels
+  show                       Show tunnel information
+  bench                      Start a crypto bench
+  bench multicore            Bench aggregate multi-core crypto throughput
+  bench multicore fallback   Same, using the ChaCha20 fallback cipher
+  bind                       Start a new tunnel
+  bind qlen                  Set the tun device's tx queue length, ...
+  bind workers               Number of worker threads, ...
+  bind cpus                  Only use these CPU cores, ...
+  set                        Change tunnel properties
+  keygen                     Generate a new secret key
+  path                       Manage paths
+  path watch                 Live-refresh path status every second
+  path mtu                   Set the fixed MTU to use, ...
+  path connections           Parallel UDP sub-flows for one path, ...
+  version                    Show version</code></pre>
+
+<h3 id="cmd-conventions">Syntax conventions</h3>
+<ul>
+  <li>Arguments are <strong>bare words</strong>, not <code>--flags</code>: <code>glorytun show dev gt0</code>, never <code>--dev gt0</code>.</li>
+  <li><code>help</code> can be appended almost anywhere to list the options valid at that point: <code>glorytun path help</code>, <code>glorytun bind help</code>.</li>
+  <li><strong>Addresses</strong> are written with explicit keywords: <code>addr 203.0.113.10 port 5000</code>. IPv4 and IPv6 are both accepted (<code>addr 2001:db8::1</code>).</li>
+  <li><strong><code>dev NAME</code></strong> selects which tunnel a management command applies to. You can omit it if exactly one tunnel is running; with several you must give it. <code>glorytun list</code> shows the available names.</li>
+  <li><strong>Durations</strong> accept <code>ms</code>, <code>s</code>, <code>m</code>, <code>h</code>, <code>d</code>, <code>w</code> (<code>250ms</code>, <code>30s</code>, <code>2h</code>). <strong>A bare number means seconds</strong> for options such as <code>kxtimeout</code> or <code>keepalive</code>, so write <code>100ms</code> explicitly for milliseconds.</li>
+  <li><strong>Rates</strong> are bytes per second. Suffixes: <code>b</code>/<code>bit</code>/<code>bits</code> = bits; <code>B</code>/<code>byte</code>/<code>bytes</code> or none = bytes; prefixes <code>k</code>, <code>m</code>, <code>g</code> (decimal) or with <code>i</code> (<code>kib</code>, binary). So <code>10mbit</code> = 10&nbsp;Mbit/s = 1,250,000&nbsp;B/s, <code>10MB</code> = 10,000,000&nbsp;B/s, and a plain <code>12500000</code> = 12,500,000&nbsp;B/s = 100&nbsp;Mbit/s. Things like <code>mbps</code> are <strong>not</strong> accepted.</li>
+  <li>Options that cannot be used together (for example <code>via</code> and <code>addr</code>) produce <code>Option X is not compatible with Y</code>.</li>
+</ul>
+
+<!-- ---------------------------------------------------------------- -->
+<h3 id="cmd-keygen">5.1 <code>keygen</code> &mdash; create a shared secret</h3>
+<pre><code>glorytun keygen</code></pre>
+<p>Prints 32 random bytes as 64 hexadecimal characters. Both peers must use the identical key. Save the output to a file with mode <code>0600</code>.</p>
+<pre><code><span class="p">$</span> glorytun keygen
+2B7E151628AED2A6ABF7158809CF4F3CA1D3E5F70896B4C2D0E1F2A3B4C5D6E7</code></pre>
+
+<!-- ---------------------------------------------------------------- -->
+<h3 id="cmd-bind">5.2 <code>bind</code> &mdash; start a tunnel</h3>
+<pre><code>glorytun bind keyfile FILE
+    [dev NAME]
+    [from addr LOCAL_IP port LOCAL_PORT]
+    [to   addr REMOTE_IP port REMOTE_PORT]
+    [persist] [chacha] [qlen N] [workers N] [cpus LIST]</code></pre>
+<p>Creates the TUN interface and the UDP sockets, starts the worker threads and the control socket, then stays in the foreground until stopped. It does <strong>not</strong> assign an IP address or bring the interface up; you do that with <code>ip</code>. It does set the interface MTU automatically (see <a href="#design-mtu">MTU</a>).</p>
+
+<dl class="opts">
+  <dt>keyfile FILE <span class="tag">required</span></dt>
+  <dd>File whose first 64 characters are the hex key from <code>keygen</code>. Trailing newline is fine. Error if missing: <code>a keyfile is needed!</code>.</dd>
+
+  <dt>dev NAME</dt>
+  <dd>Name of the TUN interface to create or attach to (<code>gt0</code>). If omitted, Linux tries <code>tun0</code> through <code>tun31</code> and uses the first free one. On macOS the name must look like <code>utun3</code>.</dd>
+
+  <dt>from addr IP port PORT</dt>
+  <dd>Local address and UDP port to bind. Default <code>0.0.0.0</code> port <code>5000</code>. Use <code>port 0</code> on a client for an automatic port. Use <code>addr ::</code> for IPv6 (on Linux this also accepts IPv4 on the same socket). Binding a specific address restricts which local address is used; <code>0.0.0.0</code> is normal for a multi-link client because <code>path up via</code> selects the link.</dd>
+
+  <dt>to addr IP port PORT</dt>
+  <dd>The remote endpoint (the server's address). Give it on the client. Leave it out on a pure server. It is also the default remote for later <code>path up</code> commands. Default <code>0.0.0.0:5000</code> (meaning "none").</dd>
+
+  <dt>persist</dt>
+  <dd>Keep the TUN interface (and its addresses/routes) alive after the process exits, so a restart does not disturb other software. Without it the interface is removed on exit. A <code>SIGHUP</code> also requests persistence before stopping.</dd>
+
+  <dt>chacha</dt>
+  <dd>Force ChaCha20-Poly1305 instead of AEGIS-256. Useful when one side has no AES hardware, or for testing. If AES is unavailable anyway the program prints <code>AES is not available, enjoy ChaCha20!</code> and falls back by itself.</dd>
+
+  <dt>qlen N</dt>
+  <dd>Set the TUN device's transmit queue length (packets). Larger values absorb bursts at the cost of more potential delay. Leave unset for the kernel default.</dd>
+
+  <dt>workers N</dt>
+  <dd>Number of worker threads (1&ndash;4096 accepted, effectively limited to 64 and 4&times; your core count). Default: cores minus one. More workers than cores can help spread many sub-flows evenly, but costs context switches. See <a href="#choosing">section 6</a>.</dd>
+
+  <dt>cpus LIST</dt>
+  <dd>Linux only. Confine the whole process to the listed cores, e.g. <code>0-2</code> or <code>0,2,4-5</code>. Every core must be currently available to the process or the command fails. If <code>workers</code> is not set, one worker per listed core is used. Useful to keep glorytun away from cores busy with something else.</dd>
+</dl>
+
+<h4>Output</h4>
+<p><code>bind</code> writes log lines to standard error and otherwise prints nothing. Typical messages:</p>
+<pre><code>running on device gt0 as pid 2417
+opened 3 independent tun queues, shared by every worker
+restricted to 4 cpu core(s): 0-3
+AES is not available, enjoy ChaCha20!
+only 2 of 3 worker threads started, continuing
+couldn't setup MTU at 1378 on device gt0     <span class="c">(needs CAP_NET_ADMIN)</span>
+couldn't reconcile interface paths: ...       <span class="c">(interface tracking problem, non-fatal)</span></code></pre>
+
+<h4>Examples</h4>
+<pre data-label="Minimal server"><code><span class="p">#</span> glorytun bind keyfile /etc/glorytun/key dev gt0 from addr 0.0.0.0 port 5000</code></pre>
+<pre data-label="Client, persistent interface, 4 workers on cores 0-3"><code><span class="p">#</span> glorytun bind keyfile /etc/glorytun/key dev gt0 persist \
+      from addr 0.0.0.0 port 0 to addr 203.0.113.10 port 5000 \
+      cpus 0-3</code></pre>
+<pre data-label="IPv6 server that also accepts IPv4"><code><span class="p">#</span> glorytun bind keyfile /etc/glorytun/key dev gt0 from addr :: port 5000</code></pre>
+
+<h4>Signals</h4>
+<table>
+  <tr><th>Signal</th><th>Effect</th></tr>
+  <tr><td><code>SIGINT</code>, <code>SIGQUIT</code>, <code>SIGTERM</code></td><td>Clean shutdown (workers stopped, control socket removed, TUN removed unless <code>persist</code>).</td></tr>
+  <tr><td><code>SIGHUP</code></td><td>Shut down but first mark the TUN persistent.</td></tr>
+  <tr><td><code>SIGPIPE</code>, <code>SIGUSR1</code>, <code>SIGUSR2</code></td><td>Ignored.</td></tr>
+</table>
+
+<!-- ---------------------------------------------------------------- -->
+<h3 id="cmd-list">5.3 <code>list</code> &mdash; find running tunnels</h3>
+<pre><code>glorytun list</code></pre>
+<p>Prints the device name of every tunnel whose control socket can be reached by the current user, one per line. Prints nothing if there are none.</p>
+<pre><code><span class="p">#</span> glorytun list
+gt0
+gt1</code></pre>
+
+<!-- ---------------------------------------------------------------- -->
+<h3 id="cmd-show">5.4 <code>show</code> &mdash; tunnel status and errors</h3>
+<pre><code>glorytun show [dev NAME]
+glorytun show [dev NAME] errors</code></pre>
+
+<h4>General status</h4>
+<pre><code><span class="p">#</span> glorytun show dev gt0
+tunnel gt0
+local  0.0.0.0:5000
+remote 203.0.113.10:5000
+pid    2417
+mtu    1378
+cipher aegis256</code></pre>
+<table>
+  <tr><th>Field</th><th>Meaning</th></tr>
+  <tr><td><code>tunnel</code></td><td>TUN device name.</td></tr>
+  <tr><td><code>local</code></td><td>The address and port glorytun bound (the real port if you asked for 0). IPv6 is shown as <code>[addr]:port</code>.</td></tr>
+  <tr><td><code>remote</code></td><td>The <code>to</code> endpoint given at start (<code>0.0.0.0:5000</code> on a server that was not given one).</td></tr>
+  <tr><td><code>pid</code></td><td>Process ID of <code>bind</code>.</td></tr>
+  <tr><td><code>mtu</code></td><td>Current MTU of the tunnel interface: the smallest path MTU minus 22. <code>0</code> before any path exists.</td></tr>
+  <tr><td><code>cipher</code></td><td><code>aegis256</code> or <code>chacha20poly1305</code> &mdash; the cipher this side requested after hardware checks. The peer may still force the fallback.</td></tr>
+</table>
+
+<h4>Error counters</h4>
+<pre><code><span class="p">#</span> glorytun show dev gt0 errors
+error decrypt count 12 from 198.51.100.99:44120
+error clocksync count 3 from 198.51.100.7:41873</code></pre>
+<p>Only counters greater than zero are printed (nothing at all on a healthy tunnel), each with the most recent source address.</p>
+<table>
+  <tr><th>Error</th><th>Cause</th><th>Action</th></tr>
+  <tr><td><code>decrypt</code></td><td>A packet failed authentication: wrong key, corruption, a scan/garbage from a stranger, or a peer on an incompatible version.</td><td>Compare keys with <code>sha256sum</code> on both machines. Occasional counts from unknown addresses are harmless noise.</td></tr>
+  <tr><td><code>clocksync</code></td><td>Timestamp outside <code>timetolerance</code>.</td><td>Fix the clock (NTP). As a temporary diagnostic only, raise it: <code>set timetolerance 1h</code>.</td></tr>
+  <tr><td><code>keyx</code></td><td>The peer's public key was unusable for key exchange.</td><td>Normally a symptom of a mismatched or malicious peer; check both ends.</td></tr>
+</table>
+
+<!-- ---------------------------------------------------------------- -->
+<h3 id="cmd-set">5.5 <code>set</code> &mdash; tunnel-wide settings</h3>
+<pre><code>glorytun set [dev NAME]
+    [kxtimeout DURATION] [timetolerance DURATION]
+    [keepalive DURATION] [reorderwindow DURATION]</code></pre>
+<p>Changes settings of the running tunnel immediately and prints the resulting values. Run with no options to just display the current values. Settings are not saved; re-apply them at start-up (see <a href="#systemd">section 8</a>).</p>
+
+<table>
+  <tr><th>Option</th><th>Default</th><th>What it does</th></tr>
+  <tr><td><code>kxtimeout</code></td><td>1h</td><td>How often session keys are rotated. Shorter rotates more often (more forward secrecy, negligible cost); the two peers do not need to match.</td></tr>
+  <tr><td><code>timetolerance</code></td><td>10m</td><td>Maximum difference accepted between a packet's timestamp and the local clock. Smaller is stricter against replay but needs well-synced clocks.</td></tr>
+  <tr><td><code>keepalive</code></td><td>25s</td><td>Interval of idle keepalive messages on an otherwise quiet single-socket path. Keep below NAT/firewall UDP timeouts (often 30&ndash;60&nbsp;s).</td></tr>
+  <tr><td><code>reorderwindow</code></td><td>off</td><td>Enables resequencing of packets arriving out of order across paths, waiting at most this long for a missing packet. <code>reorderwindow 0</code> turns it off again. See <a href="#design-reorder">2.8</a> and <a href="#choosing">section 6</a>.</td></tr>
+</table>
+
+<pre><code><span class="p">#</span> glorytun set dev gt0
+set dev gt0 kxtimeout 1h timetolerance 10m keepalive 25s reorderwindow now
+
+<span class="p">#</span> glorytun set dev gt0 reorderwindow 30ms
+set dev gt0 kxtimeout 1h timetolerance 10m keepalive 25s reorderwindow 30ms
+
+<span class="p">#</span> glorytun set dev gt0 kxtimeout 15m keepalive 20s
+set dev gt0 kxtimeout 15m timetolerance 10m keepalive 20s reorderwindow 30ms
+
+<span class="p">#</span> glorytun set dev gt0 reorderwindow 0
+set dev gt0 kxtimeout 15m timetolerance 10m keepalive 20s reorderwindow now</code></pre>
+<p>The word <code>now</code> in the output simply means "zero" (off).</p>
+
+<!-- ---------------------------------------------------------------- -->
+<h3 id="cmd-path">5.6 <code>path</code> &mdash; manage links</h3>
+<p>The most important command in day-to-day use. It either <strong>shows</strong> path status or <strong>changes</strong> a path; the two cannot be mixed in one command (<code>Path changes and status views cannot be combined</code>).</p>
+
+<h4>Selecting a path</h4>
+<table>
+  <tr><th>Selector</th><th>Meaning</th></tr>
+  <tr><td><code>dev NAME</code></td><td>Which tunnel (needed only if more than one runs).</td></tr>
+  <tr><td><code>via INTERFACE</code></td><td>Select/create the path by interface name (e.g. <code>eth0</code>, <code>wwan0</code>). Recommended on Linux: it survives address changes, link flaps and reconnects. Required for <code>connections</code> and <code>monitor</code>.</td></tr>
+  <tr><td><code>addr LOCAL_IP</code></td><td>Select by local IP address ("legacy" path). Tied to that exact address; if the address changes you must reconfigure. Shorthand: right after <code>up</code>/<code>down</code> you may write just the IP: <code>path up 192.0.2.20 dev gt0</code>.</td></tr>
+  <tr><td><code>to addr REMOTE_IP port PORT</code></td><td>The remote end of the path. Optional on a client (defaults to the <code>to</code> given to <code>bind</code>; if you give an address but no port, the tunnel's remote port is used). Use it to narrow a status view or to distinguish paths to different remotes.</td></tr>
+</table>
+<p><code>via</code> and <code>addr</code> are mutually exclusive.</p>
+
+<h4>Showing paths</h4>
+<pre><code>glorytun path [dev NAME] [via IF | addr IP] [to addr IP port N]
+glorytun path ... watch</code></pre>
+<p>One-shot or, with <code>watch</code>, redrawn every second until <kbd>Ctrl-C</kbd> in a separate screen (your scrollback is not polluted). Output is grouped per physical link: a header line, then one row per sub-flow.</p>
+
+<pre data-label="Client with two links: fibre (eth0, 4 sub-flows + monitor) and LTE (wwan0, backup)"><code><span class="p">$</span> glorytun path dev gt0
+eth0  index 2  192.168.1.20 -> 203.0.113.10:5000  rtt 11.204  tx 84.31mbps  rx 190.77mbps  recv-loss 0.00  peer-loss 0.39  probe-status <span class="ok">healthy</span>
+  ├─ 48  running   monitor  tx -  rx -  rtt 11.190  mtu 1400  public 198.51.100.7:40112
+  ├─ 49  running   tx 21.40mbps  rx 47.90mbps  rtt 11.250  mtu 1400  public 198.51.100.7:40113
+  ├─ 50  running   tx 20.95mbps  rx 47.12mbps  rtt 11.180  mtu 1400  public 198.51.100.7:40114
+  ├─ 51  running   tx 21.02mbps  rx 47.88mbps  rtt 11.226  mtu 1400  public 198.51.100.7:40115
+  └─ 52  running   tx 20.94mbps  rx 47.87mbps  rtt 11.170  mtu 1400  public 198.51.100.7:40116
+
+wwan0  index 5  10.64.12.9 -> 203.0.113.10:5000  rtt 46.810  tx -  rx -  recv-loss 0.00  peer-loss 0.00  probe-status <span class="ok">healthy</span>
+  ├─ 53  ready     monitor  tx -  rx -  rtt 46.790  mtu 1400  public 100.88.3.21:51002
+  └─ 54  ready     tx -  rx -  rtt 46.810  mtu 1400  public 100.88.3.21:51003</code></pre>
+
+<h4>Reading the header line</h4>
+<table>
+  <tr><th>Part</th><th>Meaning</th></tr>
+  <tr><td><code>eth0  index 2</code></td><td>Interface name and kernel index (<code>-</code> for legacy/passive paths, which have no interface binding).</td></tr>
+  <tr><td><code>192.168.1.20 -&gt; 203.0.113.10:5000</code></td><td>Local address in use &rarr; remote endpoint. IPv6 remotes are shown as <code>[addr]:port</code>.</td></tr>
+  <tr><td><code>rtt</code></td><td>Round-trip time in milliseconds, averaged over the link's running sub-flows.</td></tr>
+  <tr><td><code>tx</code> / <code>rx</code></td><td>Total <em>observed</em> throughput of the link in Mbit/s, summed over sub-flows. Measured by the CLI from the difference between two samples, so it shows <code>-</code> until the second sample (i.e. only in <code>watch</code> mode).</td></tr>
+  <tr><td><code>recv-loss</code></td><td>Probe loss % this side measures on traffic coming <em>from</em> the peer.</td></tr>
+  <tr><td><code>peer-loss</code></td><td>Probe loss % the <em>peer</em> last reported for traffic coming from this side. This (not <code>recv-loss</code>) decides whether this side stops using the link.</td></tr>
+  <tr><td><code>probe-status</code></td><td><code>healthy</code> / <code>degraded</code> (with colour on a terminal: green, yellow if any sub-flow is <code>late</code>; red if loss exceeds the limit in <em>both</em> directions, yellow for one direction or while still recovering). <code>no-monitor</code> if no monitor is configured. A group stays <code>degraded</code> until loss has been under the limit for <code>proberecover</code>.</td></tr>
+</table>
+
+<h4>Reading a sub-flow row</h4>
+<table>
+  <tr><th>Part</th><th>Meaning</th></tr>
+  <tr><td><code>├─ 49</code> / <code>└─ 52</code></td><td>Tree branch and the <em>socket index</em> this sub-flow uses. Indices begin after the internal pool of shared listening sockets (about 16 &times; the worker count), which is why you see numbers like 48 rather than 0.</td></tr>
+  <tr><td><code>running</code></td><td>Status (see <a href="#reading">section 9</a>).</td></tr>
+  <tr><td><code>monitor</code></td><td>Marks the dedicated probe sub-flow. It is listed first and never carries user data.</td></tr>
+  <tr><td><code>tx</code> / <code>rx</code></td><td>Observed throughput of this single sub-flow (or <code>-</code> when unknown).</td></tr>
+  <tr><td><code>rtt</code></td><td>Smoothed round-trip time of this sub-flow, ms.</td></tr>
+  <tr><td><code>mtu</code></td><td>Fixed wire size (UDP payload) in use.</td></tr>
+  <tr><td><code>public</code></td><td>The address:port the peer sees for this sub-flow (your NAT-translated address). <code>public unknown</code> until the first reply arrives.</td></tr>
+</table>
+
+<h4>Server-side view</h4>
+<p>The server has no interface bindings, so its paths show <code>-</code> for the interface name and index, and each client source port is its own row. Rows are grouped by remote address.</p>
+<pre data-label="Server"><code><span class="p">#</span> glorytun path dev gt0
+-  index -  203.0.113.10 -> 198.51.100.7:40112  rtt 11.210  tx 190.77mbps  rx 84.31mbps  recv-loss 0.39  peer-loss 0.00  probe-status <span class="ok">healthy</span>
+  ├─ 3  running   monitor  tx -  rx -  rtt 11.200  mtu 1400  public 198.51.100.7:40112
+  ├─ 4  running   tx 47.90mbps  rx 21.40mbps  rtt 11.260  mtu 1400  public 198.51.100.7:40113
+  ...</code></pre>
+
+<h4>Live view</h4>
+<pre><code><span class="p">$</span> glorytun path dev gt0 watch
+Every 1s: glorytun path   Ctrl+C to stop
+
+eth0  index 2  192.168.1.20 -> 203.0.113.10:5000  rtt 11.2 ...</code></pre>
+
+<h4>Filtering</h4>
+<pre><code><span class="p">$</span> glorytun path via wwan0               <span class="c"># only the LTE link</span>
+<span class="p">$</span> glorytun path to addr 203.0.113.10    <span class="c"># only paths to this server</span></code></pre>
+
+<h4>Changing paths</h4>
+<pre><code>glorytun path up|down [LOCAL_IP] [dev NAME] [via IF | addr IP] [to addr IP port N]
+    [rate [fixed|auto] [tx RATE] [rx RATE]]
+    [beat DURATION] [pref N] [connections N]
+    [losslimit PERCENT] [rttlimit DURATION] [mtu SIZE]
+    [monitor] [probeinterval DURATION] [probewindow N] [proberecover DURATION]</code></pre>
+<p>On success it prints the resulting configuration of the path (the first sub-flow, if there are several):</p>
+<pre><code><span class="p">#</span> glorytun path up via eth0 dev gt0 connections 4 monitor pref 0 losslimit 5% rate fixed tx 50mbit rx 100mbit
+path dev gt0 via eth0 to addr 203.0.113.10 port 5000 set up pref 0 beat 100ms losslimit 5% rttlimit off mtu 0 rate fixed tx 50Mbits rx 100Mbits  monitor</code></pre>
+<table>
+  <tr><th>Output field</th><th>Meaning</th></tr>
+  <tr><td><code>via eth0</code> or <code>addr 192.0.2.20</code></td><td>How the path is identified.</td></tr>
+  <tr><td><code>to addr&hellip; port&hellip;</code></td><td>Remote endpoint.</td></tr>
+  <tr><td><code>set up|down|passive</code></td><td>Administrative state.</td></tr>
+  <tr><td><code>pref</code>, <code>beat</code>, <code>losslimit</code>, <code>rttlimit</code>, <code>mtu</code>, <code>rate</code>, <code>tx</code>, <code>rx</code></td><td>The values now in force. <code>mtu 0</code> = default 1400, <code>tx 0bit</code> = no explicit cap, <code>rttlimit off</code> = disabled.</td></tr>
+  <tr><td><code>monitor</code> (at end)</td><td>Present if a monitor was requested.</td></tr>
+</table>
+
+<div class="callout danger">
+  <strong>Always restate <code>connections</code> and <code>monitor</code> when you re-run <code>path up via&hellip;</code></strong>
+  <p>When a <code>via</code> path is configured, the number of sub-flows and the monitor are re-evaluated from <em>that command</em>. If you later run, say, <code>path up via eth0 rate fixed tx 20mbit</code> without <code>connections 4 monitor</code>, the code treats it as <code>connections 1</code> without a monitor and takes the extra sub-flows and the monitor down. Always give the complete set of options for a link in one command (this is also what a startup script should do). Check the result with <code>glorytun path</code>.</p>
+</div>
+
+<div class="callout note">
+  <strong>Per-sub-flow settings</strong>
+  <p>Rate, preference and the other settings are applied to <em>each</em> sub-flow. With <code>connections 4</code> and <code>rate fixed tx 50mbit</code> every sub-flow is capped at 50&nbsp;Mbit/s, so the link as a whole may use up to 4&times; that. Divide your line speed by the number of sub-flows when you size the cap.</p>
+</div>
+
+<h4>Options in detail</h4>
+<dl class="opts">
+  <dt>up / down</dt>
+  <dd><code>up</code> enables (and creates) a path; <code>down</code> disables it, including all its sub-flows and monitor. A path must be created with <code>up</code> first. The desired state is remembered: if the interface disappears the path is suspended and returns on its own.</dd>
+
+  <dt>rate [fixed|auto] [tx RATE] [rx RATE]</dt>
+  <dd><code>tx</code>: maximum <em>sending</em> rate on this path (pinned, cannot be changed by the peer). <code>rx</code>: maximum rate you allow the <em>peer</em> to send to you on this path (advertised to the peer). <code>fixed</code>: use these exactly; <code>auto</code>: adapt dynamically (default; experimental). With <code>fixed</code>, <strong>always give <code>tx</code></strong>, otherwise the rate stays at its small starting value (about 1&nbsp;Mbit/s). Examples: <code>tx 50mbit</code>, <code>rx 12500000</code> (bytes/s), <code>tx 5MB</code>.</dd>
+
+  <dt>pref N</dt>
+  <dd>Preference 0&ndash;127, lower is better, default 0. Paths with a higher number carry traffic only when no lower-numbered path is working (<code>ready</code> = standby). Equal values load-share.</dd>
+
+  <dt>connections N</dt>
+  <dd>Number of parallel UDP sub-flows (1&ndash;4096; stay at or below about 32). Default 1. Requires <code>via</code>. The first sub-flow is brought up and allowed to complete the key exchange before the rest, which are then created together. Above 8 the sockets are created in groups of 8 with brief pauses; above 32 a warning is logged because a rare kernel-level stuck-socket problem was observed at very high counts.</dd>
+
+  <dt>losslimit PERCENT</dt>
+  <dd>Loss threshold, e.g. <code>5%</code> (the <code>%</code> is optional), default 100% (never). When the monitor's peer-reported loss exceeds it the link is marked <code>lossy</code> and removed from scheduling until it has been clean for <code>proberecover</code>. Needs <code>monitor</code>.</dd>
+
+  <dt>rttlimit DURATION</dt>
+  <dd>Mark the link <code>late</code> and stop using it while its RTT is above this (e.g. <code>250ms</code>). It rejoins automatically when RTT recovers. Default off. Unlike loss, this is judged per sub-flow.</dd>
+
+  <dt>mtu SIZE</dt>
+  <dd>Fixed UDP payload size in bytes, 0&ndash;65535, default 1400 (set <code>0</code>/omit for the default). Takes effect immediately. Advertised to the peer; a path with no own value follows the peer's.</dd>
+
+  <dt>monitor</dt>
+  <dd>Adds a dedicated health-probe sub-flow to the link (in addition to the data sub-flows). Requires <code>via</code>. It cannot be removed on a live path other than by taking the link down and recreating it.</dd>
+
+  <dt>probeinterval DURATION</dt>
+  <dd>Time between probes. Default 1s. Shorter = faster failure detection, slightly more traffic and noisier statistics.</dd>
+
+  <dt>probewindow N</dt>
+  <dd>Number of most-recent probes the loss percentage is computed over (1&ndash;600), default 60. With the default interval this is "the last minute". Time covered = probewindow &times; probeinterval.</dd>
+
+  <dt>proberecover DURATION</dt>
+  <dd>How long loss must stay under the limit before a degraded link is trusted again. Default 60s. Longer prevents flapping on unstable links.</dd>
+
+  <dt>beat DURATION</dt>
+  <dd>Interval of the internal control exchange on data paths (RTT, rate and counter updates). Default 100ms; there is rarely a reason to change it. Write the unit (<code>100ms</code>); a bare number is seconds.</dd>
+
+  <dt>watch</dt>
+  <dd>Only for status views: refresh every second.</dd>
+</dl>
+
+<h4>Typical error messages</h4>
+<table>
+  <tr><th>Message</th><th>Reason</th></tr>
+  <tr><td><code>no active tunnel</code></td><td>No <code>bind</code> process reachable by this user (are you root? is it running?).</td></tr>
+  <tr><td><code>please select a tunnel</code></td><td>More than one tunnel is running; add <code>dev NAME</code>.</td></tr>
+  <tr><td><code>tunnel not found</code></td><td>The <code>dev</code> you named does not exist.</td></tr>
+  <tr><td><code>connections &gt; 1 requires a path selected by 'via'</code></td><td>Sub-flows need interface-managed paths.</td></tr>
+  <tr><td><code>monitor requires a path selected by 'via'</code></td><td>Same for monitor.</td></tr>
+  <tr><td><code>path: No such file or directory</code></td><td>You tried to change (<code>down</code>) a path that was never brought <code>up</code>.</td></tr>
+  <tr><td><code>Option X is not compatible with Y</code></td><td>Mutually exclusive selectors such as <code>via</code> + <code>addr</code>, or <code>up</code> + <code>down</code>.</td></tr>
+</table>
+
+<!-- ---------------------------------------------------------------- -->
+<h3 id="cmd-bench">5.7 <code>bench</code> &mdash; cipher benchmark</h3>
+<pre><code>glorytun bench [fallback]
+glorytun bench multicore [fallback]</code></pre>
+<p>Measures raw encryption speed on this CPU for payload sizes from 20 to 1450 bytes. It never touches the network or any tunnel, needs no privileges, and can be stopped with <kbd>Ctrl-C</kbd>. Use it to decide whether a machine can keep up with your line speed and to compare AEGIS-256 with the fallback.</p>
+<ul>
+  <li><code>bench</code> &mdash; AEGIS-256 (fails with an explanatory message if the CPU lacks AES support).</li>
+  <li><code>bench fallback</code> &mdash; ChaCha20-Poly1305.</li>
+  <li><code>bench multicore</code> &mdash; aggregate speed with several threads: an independent-threads "ceiling" and a shared-queue "pool" figure, with the percentage lost to coordination. (The shared-queue pattern is a reference; the real tunnel does not use one.)</li>
+</ul>
+<pre data-label="On a terminal (values are examples only)"><code><span class="p">$</span> glorytun bench
+bench aegis256
+  size       min           mean            max
+----------------------------------------------------
+    20       910 Mbps      1021 Mbps      1104 Mbps
+   150      5210 Mbps      5822 Mbps      6190 Mbps
+   280      7870 Mbps      8205 Mbps      8660 Mbps
+ ...
+  1450     24300 Mbps     25110 Mbps     25780 Mbps</code></pre>
+<pre data-label="When output is redirected, one machine-readable line per size"><code><span class="p">$</span> glorytun bench > bench.txt; head -2 bench.txt
+bench aegis256 20 910 1021 1104
+bench aegis256 150 5210 5822 6190</code></pre>
+<pre><code><span class="p">$</span> glorytun bench multicore
+bench aegis256 multicore (4 threads)
+  size        ceiling             pool          overhead
+---------------------------------------------------------
+    20     3600 Mbps       3100 Mbps        13%
+ ...</code></pre>
+<p>Remember that real throughput also depends on packet-per-second limits, system calls and the NIC, not just the cipher; a figure of many Gbit/s here does not guarantee that rate through the tunnel.</p>
+
+<!-- ---------------------------------------------------------------- -->
+<h3 id="cmd-version">5.8 <code>version</code></h3>
+<pre><code><span class="p">$</span> glorytun version
+glorytun 1.0
+libsodium 26.1</code></pre>
+<p>First line: the program version (a fixed string in the binary). Second line: the libsodium library version in use.</p>
+
+<!-- ============================================================== -->
+<h2 id="choosing">6. Choosing the best settings</h2>
+
+<p>The defaults are safe. The table below summarises when to deviate.</p>
+
+<h3>6.1 Quick decision table</h3>
+<div class="tablewrap"><table>
+  <tr><th>If your situation is&hellip;</th><th>Then use</th><th>Why</th></tr>
+  <tr><td>One good link (office, VPS-to-VPS)</td><td><code>path up via IF monitor</code> (rate optional)</td><td>Simple, still gives encryption, and monitor shows loss and RTT.</td></tr>
+  <tr><td>Several links, all useful</td><td>Same <code>pref</code> on each, <code>rate fixed tx&hellip; rx&hellip;</code> matching each link</td><td>Traffic shares in proportion to capacity; one failing does not interrupt connections.</td></tr>
+  <tr><td>Expensive or slow backup link (LTE)</td><td>Backup link with a higher <code>pref</code> (e.g. 1), main with <code>pref 0</code></td><td>Backup stays in <code>ready</code> and costs only tiny probes until needed.</td></tr>
+  <tr><td>Long-distance link (&gt;80&nbsp;ms RTT) with poor single-stream speed</td><td><code>connections 4</code> to <code>16</code></td><td>Parallel UDP flows fill the pipe, like parallel TCP streams.</td></tr>
+  <tr><td>Bufferbloat / high latency under load</td><td><code>rate fixed</code> with <code>tx</code>/<code>rx</code> ~90&ndash;95% of real line speed</td><td>Queues build in your tunnel, not in the ISP's oversized buffer.</td></tr>
+  <tr><td>Single TCP download slower than link sum, links with different latency</td><td><code>set reorderwindow</code> ~ latency difference</td><td>Stops reordering being mistaken for loss.</td></tr>
+  <tr><td>Link that drops a few % intermittently</td><td><code>monitor</code> + <code>losslimit 5%</code> (or 2&ndash;10%)</td><td>Removes the link while it is bad, re-adds when clean.</td></tr>
+  <tr><td>Satellite or other high-latency link you want to avoid in normal times</td><td><code>rttlimit 300ms</code></td><td>Link is excluded while RTT is above the limit.</td></tr>
+  <tr><td>Underlying path has tunnels/PPPoE and large packets vanish</td><td>Lower <code>mtu</code> (e.g. 1300)</td><td>Avoids fragmentation/black-holing; there is no automatic discovery.</td></tr>
+  <tr><td>CPU without AES (small ARM/MIPS router)</td><td>Expect ChaCha20 fallback; check <code>bench fallback</code></td><td>Both sides then use ChaCha20 automatically.</td></tr>
+</table></div>
+
+<h3>6.2 Rates (<code>tx</code> / <code>rx</code>)</h3>
+<ol>
+  <li>Measure each link's real speed in each direction (e.g. with a speed test or <code>iperf3</code>) <em>without</em> the tunnel.</li>
+  <li>Set <code>tx</code> to about 90&ndash;95% of the link's <em>upload</em> and <code>rx</code> to 90&ndash;95% of its <em>download</em>, on the machine where the link is physically attached.</li>
+  <li>If the link is split into N sub-flows, divide those numbers by N (rates apply per sub-flow).</li>
+  <li>The server inherits the matching limits from the client's advertisements; you normally configure rates only on the client.</li>
+  <li>Use <code>auto</code> only if link speeds vary a lot and you are comfortable with experimental behaviour; give it a <code>tx</code> cap as an upper bound.</li>
+</ol>
+<p>Rates too <em>high</em> cause queueing and loss at the ISP; too <em>low</em> waste bandwidth. When in doubt, start at 90% and raise it until latency under load begins to rise.</p>
+
+<h3>6.3 Number of sub-flows (<code>connections</code>)</h3>
+<ul>
+  <li><strong>1</strong> is right for most low-latency links.</li>
+  <li><strong>4&ndash;8</strong> is a good start for high-bandwidth or 50&ndash;150&nbsp;ms links. Increase gradually while watching <code>glorytun path watch</code> and your real throughput.</li>
+  <li><strong>More than 16&ndash;32</strong> rarely helps and each sub-flow adds work. Above 32 a warning is logged.</li>
+  <li>Pick a multiple of your worker count so work divides evenly (e.g. 4 workers: 4, 8, 12, 16 sub-flows).</li>
+</ul>
+
+<h3>6.4 Workers, CPUs and queue length</h3>
+<ul>
+  <li>The default (cores &minus; 1) leaves one core for the rest of the system and is a good starting point.</li>
+  <li>On a router that also does heavy forwarding, use <code>cpus</code> to keep glorytun on specific cores, or lower <code>workers</code>.</li>
+  <li>If one worker is at 100% and others idle, you probably have too few sub-flows/flows to spread: raise <code>connections</code>.</li>
+  <li>Raise <code>qlen</code> only if you see transmit-queue drops on the TUN device during bursts; larger queues add latency.</li>
+</ul>
+
+<h3>6.5 Health thresholds</h3>
+<div class="tablewrap"><table>
+  <tr><th>Goal</th><th>Suggested</th></tr>
+  <tr><td>Fast failover (seconds)</td><td><code>probeinterval 500ms probewindow 20 proberecover 20s losslimit 10%</code> &mdash; reacts quickly; more false alarms on noisy links.</td></tr>
+  <tr><td>Stable, rarely flapping (default)</td><td><code>probeinterval 1s probewindow 60 proberecover 60s losslimit 5%</code></td></tr>
+  <tr><td>Very unreliable link (mobile)</td><td><code>losslimit 10%</code>, <code>proberecover 120s</code> to keep a flaky link out until it is clearly steady.</td></tr>
+</table></div>
+<p>Remember: loss % is computed over <code>probewindow</code> probes, so the smallest non-zero value is 1/probewindow. With a window of 20, one lost probe is already 5%.</p>
+
+<h3>6.6 Reorder window</h3>
+<ol>
+  <li>Measure the RTT of each link (<code>glorytun path</code>). The difference between the slowest and fastest link, divided by two, is roughly the one-way skew.</li>
+  <li>Start with <code>reorderwindow</code> around that skew plus a few ms; e.g. fibre 12&nbsp;ms and DSL 40&nbsp;ms &rarr; try <code>20ms</code>.</li>
+  <li>Test a single-stream transfer (<code>iperf3 -c ... -P 1</code>) with a few values (10, 20, 40, 80&nbsp;ms) and keep the smallest that gives good throughput.</li>
+  <li>Set it on the machine that <em>receives</em> the flow you care about (set it on both for both directions).</li>
+  <li>It adds up to that much latency to reordered traffic; interactive traffic is rarely affected because in-order packets are not delayed. Turn it off with <code>reorderwindow 0</code> if latency-sensitive traffic suffers.</li>
+</ol>
+
+<h3>6.7 MTU</h3>
+<ul>
+  <li>Leave at 1400 unless you have a reason.</li>
+  <li>Increase to 1472 (IPv4) / 1452 (IPv6) only on clean 1500-byte Ethernet paths, for slightly better efficiency.</li>
+  <li>Decrease (1280&ndash;1350) if the path crosses other tunnels (VPN-in-VPN, some mobile networks) and large downloads stall while pings work.</li>
+  <li>Set the same value on both ends or on one end only; the unset side follows. All paths should agree: the tunnel MTU is the smallest one.</li>
+</ul>
+
+<!-- ============================================================== -->
+<h2 id="recipes">7. Deployment recipes</h2>
+
+<h3>7.1 Single link, simple encrypted tunnel</h3>
+<pre data-label="Server"><code><span class="p">#</span> glorytun bind dev gt0 keyfile /etc/glorytun/key from addr 0.0.0.0 port 5000 &amp;
+<span class="p">#</span> ip addr add 10.77.0.1/30 dev gt0 &amp;&amp; ip link set gt0 up</code></pre>
+<pre data-label="Client"><code><span class="p">#</span> glorytun bind dev gt0 keyfile /etc/glorytun/key from addr 0.0.0.0 port 0 to addr 203.0.113.10 port 5000 &amp;
+<span class="p">#</span> ip addr add 10.77.0.2/30 dev gt0 &amp;&amp; ip link set gt0 up
+<span class="p">#</span> glorytun path up via eth0 dev gt0 monitor</code></pre>
+
+<h3>7.2 Bond two internet lines (fibre + DSL) for more throughput</h3>
+<p>Fibre: 200&nbsp;Mbit down / 100 up. DSL: 50 down / 10 up. Both main links, so same preference.</p>
+<pre data-label="Client"><code><span class="p">#</span> glorytun path up via eth0 dev gt0 monitor connections 4 losslimit 5% \
+      rate fixed tx 22mbit rx 45mbit            <span class="c"># per sub-flow: 90 up / 180 down in total</span>
+<span class="p">#</span> glorytun path up via ppp0 dev gt0 monitor connections 2 losslimit 5% \
+      rate fixed tx 4mbit rx 22mbit             <span class="c"># per sub-flow: 8 up / 44 down in total</span>
+<span class="p">#</span> glorytun set dev gt0 reorderwindow 30ms        <span class="c"># if single TCP streams underperform</span></code></pre>
+<p>Expected: roughly 230&nbsp;Mbit/s down and 98&nbsp;Mbit/s up in aggregate, shared in proportion to the configured rates.</p>
+
+<h3>7.3 Primary link with automatic LTE backup</h3>
+<pre data-label="Client"><code><span class="p">#</span> glorytun path up via eth0  dev gt0 monitor losslimit 5% rate fixed tx 90mbit rx 180mbit pref 0
+<span class="p">#</span> glorytun path up via wwan0 dev gt0 monitor losslimit 10% rate fixed tx 15mbit rx 40mbit pref 1</code></pre>
+<p>With both healthy, <code>wwan0</code> shows <code>ready</code> and carries only probes. If <code>eth0</code> becomes <code>lossy</code>, <code>degraded</code> or disappears, <code>wwan0</code> takes over; when <code>eth0</code> has been clean for <code>proberecover</code> traffic moves back. Because the path follows the <em>interface name</em>, an LTE modem that reconnects with a different IP resumes without any action.</p>
+
+<h3>7.4 Long, high-latency link</h3>
+<pre data-label="Client (e.g. intercontinental, ~220 ms RTT)"><code><span class="p">#</span> glorytun path up via eth0 dev gt0 monitor connections 16 rate fixed tx 6mbit rx 12mbit
+<span class="p">#</span> glorytun set dev gt0 reorderwindow 20ms</code></pre>
+<p>16 sub-flows &times; 6&nbsp;Mbit = ~96&nbsp;Mbit/s up. Raise <code>connections</code> until throughput stops improving.</p>
+
+<h3>7.5 IPv6</h3>
+<pre data-label="Server"><code><span class="p">#</span> glorytun bind dev gt0 keyfile /etc/glorytun/key from addr :: port 5000</code></pre>
+<pre data-label="Client"><code><span class="p">#</span> glorytun bind dev gt0 keyfile /etc/glorytun/key from addr :: port 0 to addr 2001:db8::10 port 5000
+<span class="p">#</span> glorytun path up via eth0 dev gt0 monitor</code></pre>
+<p>The remote address family decides whether an IPv4 or IPv6 address of <code>eth0</code> is used. The inner (tunnelled) traffic can be IPv4, IPv6 or both regardless of the outer family.</p>
+
+<h3>7.6 Two tunnels on one machine</h3>
+<p>Give each a different <code>dev</code> and local UDP port, and always add <code>dev NAME</code> to management commands:</p>
+<pre><code><span class="p">#</span> glorytun bind dev gt0 keyfile /etc/glorytun/a.key from addr 0.0.0.0 port 5000 &amp;
+<span class="p">#</span> glorytun bind dev gt1 keyfile /etc/glorytun/b.key from addr 0.0.0.0 port 5001 &amp;
+<span class="p">#</span> glorytun list
+gt0
+gt1
+<span class="p">#</span> glorytun path dev gt1</code></pre>
+
+<h3>7.7 Reapplying configuration after a restart</h3>
+<p>Nothing is saved between runs. A small start-up script should run <code>bind</code>, wait for the control socket, then apply <code>set</code> and <code>path up</code>:</p>
+<pre data-label="/etc/glorytun/start.sh (example)"><code>#!/bin/sh
+glorytun bind dev gt0 keyfile /etc/glorytun/key \
+    from addr 0.0.0.0 port 0 to addr 203.0.113.10 port 5000 &amp;
+
+# wait until the tunnel answers
+until glorytun show dev gt0 >/dev/null 2>&amp;1; do sleep 0.2; done
+
+ip addr add 10.77.0.2/30 dev gt0
+ip link set gt0 up
+
+glorytun set  dev gt0 reorderwindow 30ms
+glorytun path up via eth0  dev gt0 monitor connections 4 losslimit 5% rate fixed tx 22mbit rx 45mbit pref 0
+glorytun path up via wwan0 dev gt0 monitor losslimit 10% rate fixed tx 15mbit rx 40mbit pref 1
+
+wait</code></pre>
+
+<!-- ============================================================== -->
+<h2 id="systemd">8. Running under systemd</h2>
+<p>Installing with Meson on a system with systemd adds these files:</p>
+<table>
+  <tr><th>File</th><th>Purpose</th></tr>
+  <tr><td><code>glorytun@.service</code></td><td>Template unit; <code>glorytun@NAME</code> reads <code>/etc/glorytun/NAME/env</code>, runs <code>glorytun-run</code>, restarts on failure, and keeps only <code>CAP_NET_ADMIN</code>. An optional <code>/etc/glorytun/NAME/post.sh</code> runs after start.</td></tr>
+  <tr><td><code>glorytun-run</code></td><td>Wrapper that turns the <code>env</code> variables into a <code>bind</code> command line.</td></tr>
+  <tr><td><code>glorytun-setup</code></td><td>Interactive helper that creates the directory, key, <code>env</code> and (for clients) <code>post.sh</code>.</td></tr>
+  <tr><td><code>glorytun.network</code></td><td>systemd-networkd profile for devices named <code>gt-*</code> (server side): assigns an address, runs a DHCP server for the client, and masquerades.</td></tr>
+  <tr><td><code>glorytun-client.network</code></td><td>Profile for <code>gtc-*</code> (client side): DHCP from the server, routes in table 200.</td></tr>
+</table>
+
+<pre data-label="Generate a configuration"><code><span class="p">#</span> glorytun-setup
+Config filename (tun0): office
+Server ip (enter for server conf): 203.0.113.10
+Server port (5000):
+Server key (enter to generate a new one):
+Your new key: 9F3A61C0D2B84E57A1F0C3D9E6B2748A5D01CE93F7B6A42E8D5C1B0A3F7E9D62
+Start glorytun now ? (enter to skip): y</code></pre>
+<p>Leave "Server ip" empty to create a server configuration; give an address to create a client. The device becomes <code>gt-NAME</code> on a server and <code>gtc-NAME</code> on a client so the matching networkd profile applies.</p>
+
+<pre data-label="/etc/glorytun/office/env"><code>DEV=gtc-office
+HOST=203.0.113.10
+PORT=5000
+BIND=0.0.0.0
+BIND_PORT=
+OPTIONS=</code></pre>
+<ul>
+  <li><code>OPTIONS</code> is appended to the <code>bind</code> command, e.g. <code>OPTIONS="persist workers 4"</code>.</li>
+  <li>Put your <code>glorytun path up&hellip;</code> and <code>glorytun set&hellip;</code> commands into <code>post.sh</code> (make it executable). The generated client <code>post.sh</code> shows the pattern: it keeps the route to the server in the main table, caps the link, then routes everything else into the tunnel.</li>
+</ul>
+<pre><code><span class="p">#</span> systemctl enable --now glorytun@office
+<span class="p">#</span> systemctl status glorytun@office
+<span class="p">#</span> journalctl -u glorytun@office -f</code></pre>
+
+<div class="callout warn">
+  <strong>Check the generated command line</strong>
+  <p><code>glorytun-run</code> passes the address and port as bare words (<code>$BIND $BIND_PORT</code> and <code>to "$HOST" "$PORT"</code>), whereas the commands in this guide use the explicit <code>from addr&hellip; port&hellip;</code> / <code>to addr&hellip; port&hellip;</code> forms that are verified to work. If the service fails to start with <code>Option &hellip; is unknown</code>, edit <code>glorytun-run</code> (or write your own unit) to use the explicit form.</p>
+</div>
+
+<!-- ============================================================== -->
+<h2 id="reading">9. Reading the output: statuses explained</h2>
+
+<h3>Path statuses</h3>
+<div class="tablewrap"><table>
+  <tr><th>Status</th><th>Meaning</th><th>What to do</th></tr>
+  <tr><td><code>probing</code></td><td>Newly created or just re-bound; waiting for the first replies.</td><td>Wait a few seconds. If it stays, the packets are not reaching the peer (firewall, wrong port, routing).</td></tr>
+  <tr><td><code>running</code></td><td>Healthy and carrying traffic (monitor rows also show <code>running</code> but never carry data).</td><td>Nothing.</td></tr>
+  <tr><td><code>ready</code></td><td>Healthy but on standby because a lower-<code>pref</code> path is working.</td><td>Normal for backups.</td></tr>
+  <tr><td><code>degraded</code></td><td>Five control messages in a row went unanswered; the peer is not responding on this path.</td><td>Check the link, NAT/firewall, whether the peer process is up.</td></tr>
+  <tr><td><code>lossy</code></td><td>The peer reports probe loss above <code>losslimit</code> for traffic from you.</td><td>Link problem; it returns automatically after <code>proberecover</code> of clean readings.</td></tr>
+  <tr><td><code>late</code></td><td>RTT above <code>rttlimit</code>.</td><td>Congestion or routing change; it returns when RTT drops.</td></tr>
+  <tr><td><code>waiting</code></td><td>Passive side: nothing recently heard on this path.</td><td>The client may have stopped using it, or its link is down.</td></tr>
+  <tr><td><code>deleting</code></td><td>Taken down; removed after 5 minutes of silence.</td><td>&mdash;</td></tr>
+  <tr><td><code>interface-down</code></td><td>The interface exists in the configuration but its link is down.</td><td>Bring up the interface / reconnect the modem. The path resumes by itself.</td></tr>
+  <tr><td><code>waiting-address</code></td><td>Interface is up but has no usable address yet (no DHCP lease, IPv6 still tentative, only link-local).</td><td>Wait for an address.</td></tr>
+  <tr><td><code>down</code></td><td>Administratively disabled by <code>path down</code>.</td><td><code>path up</code> to re-enable.</td></tr>
+</table></div>
+
+<h3>Units</h3>
+<ul>
+  <li><strong>rtt</strong>: milliseconds, three decimals.</li>
+  <li><strong>tx/rx in rows and headers</strong> of <code>glorytun path</code>: megabits per second (<code>mbps</code>), measured live.</li>
+  <li><strong>tx/rx in the configuration line</strong> printed by <code>path up</code>: configured limits, shown as <code>Kbits</code>, <code>Mbits</code>, <code>Gbits</code> (bits per second).</li>
+  <li><strong>Loss</strong>: percent over the probe window.</li>
+</ul>
+
+<!-- ============================================================== -->
+<h2 id="troubleshooting">10. Troubleshooting</h2>
+
+<details open>
+<summary>Management commands say "no active tunnel"</summary>
+<div>
+<ul>
+  <li>Is <code>bind</code> running? <code>pgrep -a glorytun</code></li>
+  <li>Run the commands as the same user. A tunnel started as root is invisible to a normal user: use <code>sudo</code>.</li>
+  <li>Look for the socket: <code>ls /run/user/0/glorytun /run/glorytun.0 /tmp/glorytun.0</code>.</li>
+</ul>
+</div>
+</details>
+
+<details>
+<summary>Path stays in <code>probing</code> / ping through the tunnel fails</summary>
+<div>
+<ul>
+  <li>Is UDP port 5000 (or yours) open on the server's firewall and cloud security group?</li>
+  <li>Does the client's <code>to</code> address/port match the server's <code>from</code>? <code>glorytun show</code> on both.</li>
+  <li>Are the keys identical? <code>sha256sum key</code> on both machines. Then <code>glorytun show errors</code>: a growing <code>decrypt</code> count points to a key mismatch.</li>
+  <li>Clock difference? <code>date -u</code> on both; <code>show errors</code> with <code>clocksync</code> confirms it.</li>
+  <li>Did you assign addresses and bring up <code>gt0</code> on <em>both</em> sides? <code>ip addr show gt0</code></li>
+  <li>Watch the traffic: <code>tcpdump -ni eth0 udp port 5000</code> on the server. Nothing arriving means network/firewall; packets arriving but no replies means key/clock.</li>
+  <li>Multi-homed client: make sure packets for the chosen link really leave through it; policy routing and reverse-path filtering (<code>rp_filter</code>) on either end can drop asymmetric traffic.</li>
+</ul>
+</div>
+</details>
+
+<details>
+<summary>Ping works but large transfers stall</summary>
+<div>
+<p>Almost always an MTU problem on the underlying path. Test with a lower value: <code>glorytun path up via eth0 dev gt0 mtu 1300 monitor&hellip;</code> (restate your other options), then verify with <code>ping -M do -s 1250 10.77.0.1</code>.</p>
+</div>
+</details>
+
+<details>
+<summary>Throughput is far below the sum of the links</summary>
+<div>
+<ul>
+  <li>Are the rates correct? Too low <code>tx</code>/<code>rx</code> cap you. Check the configuration lines or <code>path</code> output.</li>
+  <li>Single stream vs many: try <code>iperf3 -P 8</code>. If many streams are fine and one is not, enable <code>reorderwindow</code> and/or add <code>connections</code>.</li>
+  <li>One CPU core at 100%? Add sub-flows or workers; check <code>top -H</code>.</li>
+  <li>Is a link <code>lossy</code> or <code>late</code> and thus excluded?</li>
+</ul>
+</div>
+</details>
+
+<details>
+<summary>A link keeps flapping between <code>running</code> and <code>lossy</code></summary>
+<div>
+<p>Raise <code>losslimit</code> or <code>proberecover</code>, or lengthen <code>probewindow</code>, to be less sensitive. Check that rates are not set above what the link can truly carry: saturating a line causes real loss that the monitor correctly sees.</p>
+</div>
+</details>
+
+<details>
+<summary>After restarting the client, one or more sub-flows stay at rtt 0</summary>
+<div>
+<p>Re-issue the <code>path up</code> command (with the full set of options). Keep <code>connections</code> at or below 32; very high counts occasionally leave a sub-flow stuck because of a kernel-level socket anomaly, and the tunnel keeps running on the others.</p>
+</div>
+</details>
+
+<details>
+<summary>The status shows <code>probe-status no-monitor</code></summary>
+<div>
+<p>No monitor sub-flow is configured on this link. Re-run <code>path up via&hellip; monitor</code> with your full option set. (Loss-based failover does not work without it.)</p>
+</div>
+</details>
+
+<details>
+<summary>Log says "couldn't setup MTU" or "couldn't create tun device"</summary>
+<div>
+<p>You lack privileges (<code>CAP_NET_ADMIN</code>/root) or <code>/dev/net/tun</code> is missing (<code>modprobe tun</code>; in containers add the device). A persistent device from an earlier run may belong to another user.</p>
+</div>
+</details>
+
+<details>
+<summary>Collecting information for a bug report</summary>
+<div>
+<pre><code>glorytun version
+glorytun show dev gt0
+glorytun show dev gt0 errors
+glorytun path dev gt0
+ip -d link show gt0
+uname -a</code></pre>
+<p>Never include your key file.</p>
+</div>
+</details>
+
+<!-- ============================================================== -->
+<h2 id="security">11. Security notes</h2>
+<ul>
+  <li><strong>Protect the key.</strong> It is the long-term secret. Store it with mode 0600 owned by root; share it only over a secure channel; rotate it (generate a new one, deploy to both ends, restart) if it may have leaked.</li>
+  <li><strong>What is protected.</strong> All traffic, including control messages, is encrypted and authenticated. A packet is silently dropped (and counted) if it fails verification; the server does not answer strangers.</li>
+  <li><strong>Forward secrecy.</strong> Session keys come from ephemeral Curve25519 exchanges and are replaced every <code>kxtimeout</code>.</li>
+  <li><strong>Replay.</strong> The timestamp window limits replays to <code>timetolerance</code>. Keep it as small as your clock quality allows; use NTP.</li>
+  <li><strong>Local access.</strong> The control socket directory is mode 0700, so only the same user (and root) can administer the tunnel. The control protocol is not an external API.</li>
+  <li><strong>Privileges.</strong> Creating the TUN, changing the MTU and tracking interfaces need <code>CAP_NET_ADMIN</code>; the systemd unit grants only that.</li>
+  <li><strong>Inner traffic is not filtered.</strong> Glorytun checks only that inner packets are well-formed IP. Use your firewall (nftables/iptables) on <code>gt0</code> to control what may pass.</li>
+  <li><strong>Not anonymity.</strong> It protects confidentiality and integrity between two endpoints; the existence of the tunnel, its endpoints and packet sizes/timing are visible on the network.</li>
+</ul>
+
+<!-- ============================================================== -->
+<h2 id="cheatsheet">12. Cheat sheet</h2>
+<pre><code><span class="c"># keys</span>
+glorytun keygen &gt; key; chmod 600 key
+
+<span class="c"># start</span>
+glorytun bind dev gt0 keyfile key from addr 0.0.0.0 port 5000                        <span class="c"># server</span>
+glorytun bind dev gt0 keyfile key from addr 0.0.0.0 port 0 to addr SERVER port 5000  <span class="c"># client</span>
+ip addr add 10.77.0.X/30 dev gt0 &amp;&amp; ip link set gt0 up
+
+<span class="c"># links (client) – give the complete set of options every time</span>
+glorytun path up via eth0 dev gt0 monitor connections 4 losslimit 5% rate fixed tx 22mbit rx 45mbit pref 0
+glorytun path up via wwan0 dev gt0 monitor rate fixed tx 15mbit rx 40mbit pref 1
+glorytun path down via wwan0 dev gt0
+
+<span class="c"># observe</span>
+glorytun list
+glorytun show dev gt0
+glorytun show dev gt0 errors
+glorytun path dev gt0
+glorytun path dev gt0 watch
+
+<span class="c"># tune at run time</span>
+glorytun set dev gt0 reorderwindow 30ms
+glorytun set dev gt0 kxtimeout 30m keepalive 20s
+
+<span class="c"># misc</span>
+glorytun bench; glorytun bench fallback; glorytun bench multicore
+glorytun version</code></pre>
+
+<!-- ============================================================== -->
+<h2 id="limits">Appendix: defaults and limits</h2>
+<div class="tablewrap"><table>
+  <tr><th>Setting</th><th>Default</th><th>Range / limit</th></tr>
+  <tr><td>Bind address / port</td><td>0.0.0.0 / 5000</td><td>IPv4 or IPv6</td></tr>
+  <tr><td>Remote (<code>to</code>)</td><td>none (0.0.0.0:5000)</td><td>&mdash;</td></tr>
+  <tr><td>Cipher</td><td>AEGIS-256 if available</td><td>ChaCha20-Poly1305 fallback</td></tr>
+  <tr><td>Workers</td><td>cores &minus; 1</td><td>1 &ndash; 32 automatic; up to 64 explicit (and &le; 4&times; cores)</td></tr>
+  <tr><td><code>kxtimeout</code></td><td>1h</td><td>&mdash;</td></tr>
+  <tr><td><code>timetolerance</code></td><td>10m</td><td>&mdash;</td></tr>
+  <tr><td><code>keepalive</code></td><td>25s</td><td>&mdash;</td></tr>
+  <tr><td><code>reorderwindow</code></td><td>off</td><td>buffer of 4096 packets, 2048-byte max packet</td></tr>
+  <tr><td><code>pref</code></td><td>0</td><td>0 &ndash; 127</td></tr>
+  <tr><td><code>beat</code></td><td>100ms</td><td>&mdash;</td></tr>
+  <tr><td><code>losslimit</code></td><td>100% (never)</td><td>0 &ndash; 100%</td></tr>
+  <tr><td><code>rttlimit</code></td><td>off</td><td>&mdash;</td></tr>
+  <tr><td><code>mtu</code></td><td>1400 (tunnel MTU 1378)</td><td>0 &ndash; 65535 (IPv4 practical max 65507)</td></tr>
+  <tr><td><code>connections</code></td><td>1</td><td>1 &ndash; 4096 (keep &le; 32)</td></tr>
+  <tr><td><code>probeinterval</code></td><td>1s</td><td>&mdash;</td></tr>
+  <tr><td><code>probewindow</code></td><td>60 probes</td><td>1 &ndash; 600</td></tr>
+  <tr><td><code>proberecover</code></td><td>60s</td><td>effective max 600 probe-intervals</td></tr>
+  <tr><td>Initial path rate</td><td>~1 Mbit/s (125,000 B/s)</td><td>auto mode ceiling 1 GB/s when no <code>tx</code> is set</td></tr>
+  <tr><td>Maximum paths</td><td colspan="2">512 (per tunnel)</td></tr>
+  <tr><td>Maximum sockets</td><td colspan="2">4096 (including the internal receive pool)</td></tr>
+  <tr><td>Passive path timeout</td><td colspan="2">5 minutes without traffic</td></tr>
+  <tr><td>Per-packet overhead</td><td colspan="2">22 bytes (6 timestamp + 16 tag) + UDP/IP; +4 for resequenced non-TCP packets</td></tr>
+</table></div>
+
+<p class="meta" style="margin-top:3rem">This guide documents the code in this repository. The configuration lines and tables reflect the program's behaviour as read from its source; verify unusual combinations in a test environment before relying on them in production.</p>
+
+</main>
+</div>
+
+<script>
+(function () {
+  // copy buttons
+  document.querySelectorAll('pre').forEach(function (pre) {
+    var b = document.createElement('button');
+    b.className = 'copy'; b.type = 'button'; b.textContent = 'Copy';
+    b.addEventListener('click', function () {
+      var text = pre.querySelector('code').innerText.split('\n')
+        .map(function (l) { return l.replace(/^[$#] /, ''); }).join('\n');
+      var done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1200); };
+      if (navigator.clipboard) { navigator.clipboard.writeText(text).then(done, function () {}); }
+    });
+    pre.appendChild(b);
+  });
+  // theme toggle
+  var btn = document.getElementById('themeBtn');
+  btn.addEventListener('click', function () {
+    var r = document.documentElement;
+    var dark = r.getAttribute('data-theme') === 'dark' ||
+      (!r.getAttribute('data-theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    r.setAttribute('data-theme', dark ? 'light' : 'dark');
+  });
+})();
+</script>
+</body>
+</html>
